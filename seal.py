@@ -114,7 +114,10 @@ def plan(source, destination, ledger_id=None):
         raise Refused('destination', f'Unsafe destination: {rel}')
     if any(part.startswith('.') for part in rel.split('/')):
         raise Refused('hidden', f'Hidden files are not sealed: {rel}')
-    known, head, events, files = ai.history(archive)[:4]
+    known, head, events, files, _, sealed_collections, items = ai.history(archive)
+    within = next((i for i in [*items, *sealed_collections] if rel == i or rel.startswith(i + '/')), None)
+    if within:
+        raise Refused('sealed', f'Destination is within sealed {within}: {rel}')
     actual = ai.inventory(archive)
     try:
         cids = cid.cid_tree(archive)
