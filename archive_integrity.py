@@ -30,8 +30,12 @@ import sys
 import tempfile
 import uuid
 
-META = '.archive-integrity'
-ANCHORS = '.archive-integrity-anchors'
+import cid
+
+INTEGRITY = 'archive-integrity'  # beside an archive: ledger/ and checkpoints/
+META = '.archive-integrity'  # legacy: the ledger inside an archive
+ANCHORS = '.archive-integrity-anchors'  # legacy: checkpoints beside a root
+DECLARATION = b'#+COLLECTION: t'
 
 
 class Refused(ValueError):
@@ -128,13 +132,28 @@ def canonical_uuid(value):
         return False
 
 
+def ledger_folder(archive):
+    """The archive's ledger folder: beside it, else the legacy one inside."""
+    beside, inside = archive.parent / INTEGRITY / 'ledger', archive / META
+    present = [f for f in (beside, inside) if f.exists() or f.is_symlink()]
+    if len(present) > 1:
+        raise Refused('ledger', f'Two ledgers for one archive: {archive}')
+    return present[0] if present else inside
+
+
+def is_cid(value):
+    return isinstance(value, str) and re.fullmatch('b[a-z2-7]+', value) is not None
+
+
 def history(archive):
-    folder = archive / META
+    """entries, head, events, files, recorded root, collections."""
+    folder = ledger_folder(archive)
     if not folder.exists() and not folder.is_symlink():
-        return {}, None, 0, []
+        return {}, None, 0, [], None, []
     if folder.is_symlink() or not folder.is_dir():
         raise Refused('ledger', f'Invalid ledger: {folder}')
     entries, previous, files, ledger_id = {}, None, [], None
+    schema, root, collections = None, None, set()
     for number, path in enumerate(sorted(folder.iterdir()), 1):
         regular(path)
         data = path.read_bytes()
@@ -142,9 +161,24 @@ def history(archive):
         if not match or int(match[1]) != number or sha(data) != match[2]:
             raise Refused('sequence', f'Ledger sequence/hash failure: {path}')
         event = json.loads(data)
-        if (set(event) not in ({'schema', 'previous', 'add'}, {'schema', 'previous', 'add', 'ledger_id'})
-                or event['schema'] != 1 or event['previous'] != previous):
+        keys = set(event) if isinstance(event, dict) else set()
+        if not ((event.get('schema') == 1 and schema != 2
+                 and keys in ({'schema', 'previous', 'add'}, {'schema', 'previous', 'add', 'ledger_id'}))
+                or (event.get('schema') == 2
+                    and keys == {'schema', 'previous', 'add', 'ledger_id', 'root', 'collections'})) \
+                or event['previous'] != previous:
             raise Refused('chain', f'Ledger chain failure: {path}')
+        schema = event['schema']
+        root = event.get('root')
+        if schema == 2:
+            listed = event['collections']
+            if (not is_cid(root) or not isinstance(listed, list)
+                    or not all(isinstance(c, str) for c in listed)
+                    or listed != sorted(set(listed))):
+                raise Refused('entry', f'Invalid root or collections: {path}')
+            for name in listed:
+                safe(name)
+            collections.update(listed)
         # The first deployed hook wrote a v1 prefix before ledger UUIDs existed.
         # Preserve those events; the next event binds an identity additively.
         event_id = event.get('ledger_id')
@@ -160,7 +194,10 @@ def history(archive):
             safe(name)
             if name.split('/')[0] == META or name in entries:
                 raise Refused('entry', 'Ledger cannot replace an earlier entry or index itself')
-            if (set(entry) != {'sha256', 'size', 'mode'} or not re.fullmatch('[0-9a-f]{64}', entry['sha256'])
+            fields = {'sha256', 'size', 'mode', 'cid'} if schema == 2 else {'sha256', 'size', 'mode'}
+            if (not isinstance(entry, dict) or set(entry) != fields
+                    or (schema == 2 and not is_cid(entry['cid']))
+                    or not re.fullmatch('[0-9a-f]{64}', entry['sha256'])
                     or not isinstance(entry['size'], int) or entry['size'] < 0
                     or not isinstance(entry['mode'], int) or entry['mode'] & 0o222):
                 raise Refused('entry', 'Invalid ledger entry')
@@ -169,7 +206,7 @@ def history(archive):
         files.append(path)
     if not files:
         raise Refused('empty', f'Empty ledger needs investigation: {folder}')
-    return entries, previous, len(files), files
+    return entries, previous, len(files), files, root, sorted(collections)
 
 
 def differences(known, actual):
@@ -178,13 +215,24 @@ def differences(known, actual):
                 new=sorted(set(actual) - set(known)))
 
 
-def anchor_home(root):
+def anchor_base(root):
     root = checked(root).resolve()
-    return (root.parent if root.name == 'archives' else root) / ANCHORS
+    return root.parent if root.name == 'archives' else root
+
+
+def anchor_home(root):
+    """Where new checkpoints for root go: beside it, else the legacy folder."""
+    base = anchor_base(root)
+    return base / INTEGRITY / 'checkpoints' if (base / INTEGRITY).is_dir() else base / ANCHORS
+
+
+def anchor_homes(root):
+    base = anchor_base(root)
+    return {base / ANCHORS, base / INTEGRITY / 'checkpoints'}
 
 
 def checkpoint_files(root, archives):
-    folders = {anchor_home(root), *(anchor_home(a) for a in archives)}
+    folders = set(anchor_homes(root)).union(*(anchor_homes(a) for a in archives))
     files = []
     for folder in sorted(folders):
         if not folder.exists() and not folder.is_symlink():
@@ -212,9 +260,12 @@ def check_anchors(root, archives):
             required.update(value['heads'])
     present = set()
     for archive in archives:
-        # Includes the unchanged ledgers carried inside retired projects.
-        for path in archive.rglob('*.json'):
-            if path.parent.name == META:
+        # Its own ledger, and the unchanged ledgers carried inside retired projects.
+        folder = ledger_folder(archive)
+        own = list(folder.glob('*.json')) if folder.is_dir() else []
+        for path in own + list(archive.rglob('*.json')):
+            if path in own or path.parent.name == META or (
+                    path.parent.name == 'ledger' and path.parent.parent.name == INTEGRITY):
                 regular(path)
                 present.add(sha(path.read_bytes()))
     if required - present:
@@ -243,14 +294,39 @@ def report(root):
     check_anchors(root, archives)
     writable_checkpoints = [str(p) for p in checkpoint_files(root, archives) if regular(p).st_mode & 0o222]
     for archive in archives:
-        known, head, count, metadata = history(archive)
+        known, head, count, metadata, recorded, collections = history(archive)
         actual = inventory(archive)
-        diff = differences(known, actual)
-        writable = [str(p.relative_to(archive)) for p in [*(archive / n for n in actual), *metadata]
+        try:
+            cids = cid.cid_tree(archive)
+        except cid.ShardingUnsupported:
+            cids = None
+        compared = {n: dict(e, cid=cids.get(n)) if cids is not None and 'cid' in known.get(n, {}) else e
+                    for n, e in actual.items()}
+        diff = differences(known, compared)
+        writable = [os.path.relpath(p, archive) for p in [*(archive / n for n in actual), *metadata]
                     if regular(p).st_mode & 0o222]
+        hidden = [n for n in actual if any(part.startswith('.') for part in n.split('/'))
+                  and not any(part in (META, ANCHORS) for part in n.split('/'))]
+        undeclared = [c for c in collections if not declared(archive / c)]
         reports.append(dict(archive=str(archive), head=head, events=count, files=len(actual),
-                            writable=sorted(writable), checkpoint_writable=writable_checkpoints if not reports else [], **diff))
+                            writable=sorted(writable), checkpoint_writable=writable_checkpoints if not reports else [],
+                            root=cids['.'] if cids is not None else None, recorded_root=recorded,
+                            hidden=sorted(hidden), undeclared=undeclared, **diff))
     return reports
+
+
+def findings(report):
+    """Whether an archive's report has any finding."""
+    return bool(not report['head'] or report['changed'] or report['missing'] or report['new']
+                or report['writable'] or report['checkpoint_writable'] or report['hidden']
+                or report['undeclared']
+                or (report['recorded_root'] is not None and report['recorded_root'] != report['root']))
+
+
+def declared(directory):
+    """Whether directory's README.org has the declaration line."""
+    readme = directory / 'README.org'
+    return readme.is_file() and DECLARATION in readme.read_bytes().split(b'\n')
 
 
 def preview(root, target=None):
@@ -258,7 +334,7 @@ def preview(root, target=None):
     check_anchors(root, roots(root))
     plan = dict(schema=1, root=str(root), archives=[])
     for archive in roots(root):
-        known, head, count, metadata = history(archive)
+        known, head, count, metadata = history(archive)[:4]
         prior_id = json.loads(metadata[-1].read_bytes()).get('ledger_id') if metadata else None
         ledger_id = prior_id or str(uuid.uuid4())
         actual = inventory(archive)
@@ -309,7 +385,7 @@ def apply_plan(plan, expected, checkpoint=lambda phase: None):
         if archive.name != 'archives' or not archive.is_dir() or archive in seen:
             raise ValueError('Invalid or repeated archive boundary')
         seen.add(archive)
-        known, head, count, metadata = history(archive)
+        known, head, count, metadata = history(archive)[:4]
         actual = inventory(archive)
         diff = differences(known, actual)
         if sha(encoded(actual)) != item['inventory_sha256']:
@@ -336,7 +412,7 @@ def apply_plan(plan, expected, checkpoint=lambda phase: None):
     checkpoint('validated')
     for archive, item, data, filename, done in prepared:
         if not done:
-            new_file(archive / META / filename, data)
+            new_file(ledger_folder(archive) / filename, data)
         checkpoint('after-ledger')
         # Only protect the records selected by this operation and ledger files.
         for name in item['add']:
@@ -344,7 +420,7 @@ def apply_plan(plan, expected, checkpoint=lambda phase: None):
             if record(path) != item['add'][name]:
                 raise ValueError(f'File changed during enrolment: {path}')
             path.chmod(stat.S_IMODE(regular(path).st_mode) & ~0o222)
-        for path in (archive / META).iterdir():
+        for path in ledger_folder(archive).iterdir():
             path.chmod(stat.S_IMODE(regular(path).st_mode) & ~0o222)
         checkpoint('after-protection')
     checkpoint_heads(root)
@@ -368,7 +444,7 @@ def repair(root):
     count = 0
     for item in checks:
         archive = Path(item['archive'])
-        known, _, _, metadata = history(archive)
+        known, _, _, metadata = history(archive)[:4]
         for path in [*(archive / name for name in known), *metadata]:
             mode = stat.S_IMODE(regular(path).st_mode)
             if mode & 0o222:
@@ -414,7 +490,7 @@ only permissions are changed there. Call with the final published path.
         plan = preview(archive, path.resolve())
         apply_plan(plan, sha(encoded(plan)))
         # A retry after permission drift must also protect existing selected files.
-        known, _, _, _ = history(archive)
+        known = history(archive)[0]
         for name in known:
             file = archive / name
             if file == path.resolve() or path.resolve() in file.parents:
@@ -451,7 +527,7 @@ def main():
         if args.command == 'check':
             result = report(args.root)
             print(json.dumps(result, indent=2))
-            return int(any(not r['head'] or r['changed'] or r['missing'] or r['new'] or r['writable'] or r['checkpoint_writable'] for r in result))
+            return int(any(findings(r) for r in result))
         if args.command == 'preview':
             print(encoded(preview(args.root)).decode(), end='')
             return 0
