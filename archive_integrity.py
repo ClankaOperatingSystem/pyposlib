@@ -146,14 +146,14 @@ def is_cid(value):
 
 
 def history(archive):
-    """entries, head, events, files, recorded root, collections."""
+    """entries, head, events, files, recorded root, collections, items."""
     folder = ledger_folder(archive)
     if not folder.exists() and not folder.is_symlink():
-        return {}, None, 0, [], None, []
+        return {}, None, 0, [], None, [], []
     if folder.is_symlink() or not folder.is_dir():
         raise Refused('ledger', f'Invalid ledger: {folder}')
     entries, previous, files, ledger_id = {}, None, [], None
-    schema, root, collections = None, None, set()
+    schema, root, collections, items = None, None, set(), []
     for number, path in enumerate(sorted(folder.iterdir()), 1):
         regular(path)
         data = path.read_bytes()
@@ -165,20 +165,29 @@ def history(archive):
         if not ((event.get('schema') == 1 and schema != 2
                  and keys in ({'schema', 'previous', 'add'}, {'schema', 'previous', 'add', 'ledger_id'}))
                 or (event.get('schema') == 2
-                    and keys == {'schema', 'previous', 'add', 'ledger_id', 'root', 'collections'})) \
+                    and keys == {'schema', 'previous', 'add', 'ledger_id', 'root', 'collections', 'item'})) \
                 or event['previous'] != previous:
             raise Refused('chain', f'Ledger chain failure: {path}')
         schema = event['schema']
         root = event.get('root')
         if schema == 2:
-            listed = event['collections']
-            if (not is_cid(root) or not isinstance(listed, list)
+            listed, item = event['collections'], event['item']
+
+            def within(p):
+                return p == item or p.startswith(item + '/')
+            if (not is_cid(root) or not isinstance(listed, list) or not isinstance(item, str)
                     or not all(isinstance(c, str) for c in listed)
-                    or listed != sorted(set(listed))):
-                raise Refused('entry', f'Invalid root or collections: {path}')
-            for name in listed:
-                safe(name)
+                    or listed != sorted(set(listed))
+                    or not isinstance(event['add'], dict)
+                    or not all(within(c) for c in listed) or not all(within(n) for n in event['add'])):
+                raise Refused('entry', f'Invalid root, item or collections: {path}')
+            for name in [item, *listed]:
+                try:
+                    safe(name)
+                except Refused:
+                    raise Refused('entry', f'Invalid root, item or collections: {path}')
             collections.update(listed)
+            items.append(item)
         # The first deployed hook wrote a v1 prefix before ledger UUIDs existed.
         # Preserve those events; the next event binds an identity additively.
         event_id = event.get('ledger_id')
@@ -206,7 +215,7 @@ def history(archive):
         files.append(path)
     if not files:
         raise Refused('empty', f'Empty ledger needs investigation: {folder}')
-    return entries, previous, len(files), files, root, sorted(collections)
+    return entries, previous, len(files), files, root, sorted(collections), sorted(items)
 
 
 def differences(known, actual):
@@ -294,7 +303,7 @@ def report(root):
     check_anchors(root, archives)
     writable_checkpoints = [str(p) for p in checkpoint_files(root, archives) if regular(p).st_mode & 0o222]
     for archive in archives:
-        known, head, count, metadata, recorded, collections = history(archive)
+        known, head, count, metadata, recorded, collections, _ = history(archive)
         actual = inventory(archive)
         try:
             cids = cid.cid_tree(archive)

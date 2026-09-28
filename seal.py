@@ -183,6 +183,7 @@ def apply(plan, expected):
         raise Refused('plan', f'Item changed after the move: {destination}')
     root = cid.cid_directory(archive)
     data = encoded(dict(schema=2, previous=plan['previous'], ledger_id=plan['ledger_id'],
+                        item=os.path.relpath(destination, archive),
                         add=plan['add'], root=root, collections=plan['collections']))
     event = ledger / f"{plan['number']:08}-{sha(data)}.json"
     head, events = ai.history(archive)[1:3]
