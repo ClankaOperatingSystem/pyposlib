@@ -8,6 +8,7 @@ Python library for a personal OS in Org files, beside the Emacs Lisp
   additive events per =archives/=, write bits removed from enrolled files,
   checkpoints of ledger heads.
 - =cid.py= :: IPFS CIDs of files and trees, computed locally.
+- =seal.py= :: sealing items into archives: a plan, reviewed, then applied.
 - =test/= :: unittest tests.
 
 * Use
@@ -18,6 +19,13 @@ Python library for a personal OS in Org files, beside the Emacs Lisp
 Commands: =check=, =preview=, =apply=, =repair=, =verify-existing=,
 =checkpoint=, =seal=, =write-new=. Exit 0 clean, 1 findings, 2 invalid
 input or conflict.
+
+Sealing, in two steps:
+
+: python3 seal.py seal SOURCE DESTINATION > plan.json
+: python3 seal.py apply plan.json "$(shasum -a 256 plan.json | cut -d' ' -f1)"
+
+=write-new DESTINATION= plans a new record from standard input.
 
 * Check
 

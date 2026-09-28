@@ -70,6 +70,8 @@ class Formats(unittest.TestCase):
 
     def test_ledgers(self):
         for name, fixture in fixtures('ledger'):
+            if fixture['kind'] == 'seal':
+                continue  # test_seal.py
             with self.subTest(name), Built(fixture) as root:
                 getattr(self, 'ledger_' + fixture['kind'])(fixture, root)
 
