@@ -1,4 +1,4 @@
-# make check: the tests, then the fixtures shared with poslib.
+# make check: the tests, then the shared fixtures and poslib, differentially.
 # make check-ipfs IPFS=path/to/ipfs: the CID fixtures against kubo, offline.
 #
 # The shared fixtures are poslib's: POSLIB names a checkout, else poslib/
@@ -12,15 +12,18 @@ POSLIB     ?= poslib
 
 export POSLIB
 
-.PHONY: check check-ipfs test formats poslib
+.PHONY: check check-ipfs test formats differential poslib
 
-check: test formats
+check: test formats differential
 
 test:
 	$(PYTHON) -B test/test_archive_integrity.py
 
 formats: poslib
 	$(PYTHON) -B test/test_formats.py
+
+differential: poslib
+	$(PYTHON) -B test/test_differential.py
 
 check-ipfs: poslib
 	$(PYTHON) -B test/check_ipfs.py $(IPFS)
