@@ -392,7 +392,7 @@ only permissions are changed there. Call with the final published path.
     if archive:
         # Validate all path components, even those beneath the archive boundary.
         current = path
-        while current != archive and current != current.parent:
+        while current.resolve() != archive and current != current.parent:
             if current.is_symlink():
                 raise ValueError(f'Symlink in publication: {current}')
             current = current.parent
@@ -460,7 +460,7 @@ def main():
                 raise ValueError('write-new requires an archives/ destination')
             # Reject ancestor links before creating anything.
             for parent in [path, *path.parents]:
-                if parent == archive.parent:
+                if parent.resolve() == archive.parent:
                     break
                 if parent.is_symlink():
                     raise ValueError('Symlink in publication path')

@@ -28,7 +28,7 @@ from archive_integrity import (META, apply_plan, encoded, history, inventory,
                                preview, record, repair, report, seal_archive, sha)
 
 HOME = Path(__file__).resolve().parent.parent
-RUN = Path(tempfile.mkdtemp(prefix='pyposlib-')).resolve()
+RUN = Path(tempfile.mkdtemp(prefix='pyposlib-'))
 
 
 class IntegrityChecks(unittest.TestCase):
