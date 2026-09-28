@@ -43,9 +43,11 @@ def poslib(tasks):
     with tempfile.TemporaryDirectory() as work:
         request, answer = Path(work) / 'tasks.json', Path(work) / 'answers.json'
         request.write_text(json.dumps(tasks), encoding='utf-8')
-        subprocess.run([EMACS, '-Q', '--batch', '-L', str(POSLIB / 'lisp'),
-                        '-l', str(HERE / 'differential.el'), str(request), str(answer)],
-                       check=True, capture_output=True)
+        result = subprocess.run([EMACS, '-Q', '--batch', '-L', str(POSLIB / 'lisp'),
+                                 '-l', str(HERE / 'differential.el'), str(request), str(answer)],
+                                capture_output=True, text=True)
+        if result.returncode:
+            raise AssertionError(f'poslib failed:\n{result.stderr}')
         return json.loads(answer.read_bytes())
 
 
