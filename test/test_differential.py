@@ -29,6 +29,7 @@ import unittest
 from fixtures import POSLIB, HERE, writable, write
 import archive_integrity as ai
 import cid
+import seal
 
 EMACS = os.environ.get('EMACS', 'emacs')
 SEED = int(os.environ.get('DIFFERENTIAL_SEED', '73'))
@@ -130,6 +131,49 @@ class Differential(unittest.TestCase):
             tasks.append(dict(kind='check', path=str(root)))
             try:
                 ours.append(relative(ai.report(root), root))
+            except ai.Refused as refused:
+                ours.append('refused:' + refused.kind)
+        self.assertEqual(ai.encoded(ours), ai.encoded(poslib(tasks)))
+
+
+class DifferentialSeal(unittest.TestCase):
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp(prefix='pyposlib-differential-'))
+
+    def tearDown(self):
+        writable(self.work)
+        shutil.rmtree(self.work)
+
+    @unittest.skipUnless(shutil.which(EMACS), 'needs Emacs')
+    def test_seals_agree_on_random_items(self):
+        rng = random.Random(SEED)
+        tasks, ours = [], []
+        for i in range(20):
+            base = self.work / f'seal-{i}'
+            archive = base / 'scope' / 'archives'
+            archive.mkdir(parents=True)
+            tree(rng, archive)
+            if rng.random() < 0.5:
+                enrol(base / 'scope')
+            item = base / 'scope' / 'item'
+            item.mkdir()
+            tree(rng, item)
+            if rng.random() < 0.3:
+                write(item / 'README.org', b'#+TITLE: Item\n#+COLLECTION: t\n')
+            theirs = self.work / f'seal-{i}-poslib'
+            shutil.copytree(base, theirs, symlinks=True)
+            task = dict(source='scope/item', destination=f'scope/archives/sealed-{i}',
+                        ledger_id='0f1e2d3c-4b5a-4968-8778-a6b5c4d3e2f1')
+            tasks.append(dict(kind='seal', path=str(theirs), **task))
+            root = base.resolve()
+            try:
+                plan = seal.plan(root / task['source'], root / task['destination'], task['ledger_id'])
+                event, _ = seal.apply(plan, ai.sha(ai.encoded(plan)))
+                ours.append(dict(plan={k: os.path.relpath(v, root)
+                                       if k in ('source', 'destination', 'archive', 'ledger') else v
+                                       for k, v in plan.items()},
+                                 event=event.read_bytes().decode(),
+                                 report=relative(ai.report(root), root)))
             except ai.Refused as refused:
                 ours.append('refused:' + refused.kind)
         self.assertEqual(ai.encoded(ours), ai.encoded(poslib(tasks)))
