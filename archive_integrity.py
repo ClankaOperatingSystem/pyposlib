@@ -34,6 +34,14 @@ META = '.archive-integrity'
 ANCHORS = '.archive-integrity-anchors'
 
 
+class Refused(ValueError):
+    """A refusal of a kind poslib's doc/formats.org names."""
+
+    def __init__(self, kind, message):
+        super().__init__(message)
+        self.kind = kind
+
+
 def encoded(value):
     return (json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')) + '\n').encode()
 
@@ -46,7 +54,7 @@ def safe(relative):
     p = PurePosixPath(relative)
     if (not relative or p.is_absolute() or str(p) != relative
             or any(x in ('', '.', '..') for x in relative.split('/')) or '\\' in relative):
-        raise ValueError(f'Unsafe relative path: {relative}')
+        raise Refused('entry', f'Unsafe relative path: {relative}')
     return relative
 
 
@@ -57,14 +65,14 @@ def checked(path):
     # before descending; all descendants are checked independently below.
     for part in [path, *path.parents]:
         if part.is_symlink() and str(part) not in ('/tmp', '/var'):
-            raise ValueError(f'Symlink: {part}')
+            raise Refused('link', f'Symlink: {part}')
     return path
 
 
 def regular(path):
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        raise ValueError(f'Expected a regular file with one link: {path}')
+        raise Refused('link', f'Expected a regular file with one link: {path}')
     return info
 
 
@@ -73,7 +81,7 @@ def record(path):
     data = path.read_bytes()
     after = regular(path)
     if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
-        raise ValueError(f'File changed while reading: {path}')
+        raise Refused('changed', f'File changed while reading: {path}')
     return dict(sha256=sha(data), size=len(data), mode=stat.S_IMODE(after.st_mode) & ~0o222)
 
 
@@ -81,7 +89,7 @@ def roots(root):
     """Discover outermost archive trees; ignore disposable/hidden active trees."""
     root = checked(root).resolve()
     if not root.is_dir():
-        raise ValueError('Root must be an existing directory')
+        raise Refused('root', 'Root must be an existing directory')
     if root.name == 'archives':
         return [root]
     found = []
@@ -90,7 +98,7 @@ def roots(root):
         for name in list(dirs):
             p = Path(here) / name
             if p.is_symlink():
-                raise ValueError(f'Symlink in discovery: {p}')
+                raise Refused('link', f'Symlink in discovery: {p}')
             if name == 'archives':
                 found.append(p)
                 dirs.remove(name)
@@ -104,13 +112,20 @@ def inventory(archive):
             dirs[:] = [d for d in dirs if d != META]
         for name in dirs:
             if (Path(here) / name).is_symlink():
-                raise ValueError(f'Symlink in archive: {Path(here) / name}')
+                raise Refused('link', f'Symlink in archive: {Path(here) / name}')
         for name in files:
             path = Path(here) / name
             if Path(here) == archive and name == META:
-                raise ValueError('Integrity metadata must be a directory')
+                raise Refused('ledger', 'Integrity metadata must be a directory')
             result[path.relative_to(archive).as_posix()] = record(path)
     return dict(sorted(result.items()))
+
+
+def canonical_uuid(value):
+    try:
+        return isinstance(value, str) and str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
 
 
 def history(archive):
@@ -118,42 +133,42 @@ def history(archive):
     if not folder.exists() and not folder.is_symlink():
         return {}, None, 0, []
     if folder.is_symlink() or not folder.is_dir():
-        raise ValueError(f'Invalid ledger: {folder}')
+        raise Refused('ledger', f'Invalid ledger: {folder}')
     entries, previous, files, ledger_id = {}, None, [], None
     for number, path in enumerate(sorted(folder.iterdir()), 1):
         regular(path)
         data = path.read_bytes()
         match = re.fullmatch(r'(\d{8})-([0-9a-f]{64})\.json', path.name)
         if not match or int(match[1]) != number or sha(data) != match[2]:
-            raise ValueError(f'Ledger sequence/hash failure: {path}')
+            raise Refused('sequence', f'Ledger sequence/hash failure: {path}')
         event = json.loads(data)
         if (set(event) not in ({'schema', 'previous', 'add'}, {'schema', 'previous', 'add', 'ledger_id'})
                 or event['schema'] != 1 or event['previous'] != previous):
-            raise ValueError(f'Ledger chain failure: {path}')
+            raise Refused('chain', f'Ledger chain failure: {path}')
         # The first deployed hook wrote a v1 prefix before ledger UUIDs existed.
         # Preserve those events; the next event binds an identity additively.
         event_id = event.get('ledger_id')
         if event_id is not None:
-            if str(uuid.UUID(event_id)) != event_id or (ledger_id is not None and event_id != ledger_id):
-                raise ValueError('Ledger identity changed')
+            if not canonical_uuid(event_id) or (ledger_id is not None and event_id != ledger_id):
+                raise Refused('identity', 'Ledger identity changed')
             ledger_id = event_id
         elif ledger_id is not None:
-            raise ValueError('Ledger identity removed')
+            raise Refused('identity', 'Ledger identity removed')
         if not isinstance(event['add'], dict):
-            raise ValueError('Invalid ledger additions')
+            raise Refused('entry', 'Invalid ledger additions')
         for name, entry in event['add'].items():
             safe(name)
             if name.split('/')[0] == META or name in entries:
-                raise ValueError('Ledger cannot replace an earlier entry or index itself')
+                raise Refused('entry', 'Ledger cannot replace an earlier entry or index itself')
             if (set(entry) != {'sha256', 'size', 'mode'} or not re.fullmatch('[0-9a-f]{64}', entry['sha256'])
                     or not isinstance(entry['size'], int) or entry['size'] < 0
                     or not isinstance(entry['mode'], int) or entry['mode'] & 0o222):
-                raise ValueError('Invalid ledger entry')
+                raise Refused('entry', 'Invalid ledger entry')
             entries[name] = entry
         previous = sha(data)
         files.append(path)
     if not files:
-        raise ValueError(f'Empty ledger needs investigation: {folder}')
+        raise Refused('empty', f'Empty ledger needs investigation: {folder}')
     return entries, previous, len(files), files
 
 
@@ -175,7 +190,7 @@ def checkpoint_files(root, archives):
         if not folder.exists() and not folder.is_symlink():
             continue
         if folder.is_symlink() or not folder.is_dir():
-            raise ValueError('Invalid checkpoint directory')
+            raise Refused('checkpoint', 'Invalid checkpoint directory')
         files.extend(sorted(folder.iterdir()))
     return files
 
@@ -186,13 +201,13 @@ def check_anchors(root, archives):
         regular(path)
         data = path.read_bytes()
         if path.name != sha(data) + '.json':
-            raise ValueError(f'Checkpoint hash failure: {path}')
+            raise Refused('checkpoint', f'Checkpoint hash failure: {path}')
         value = json.loads(data)
         if (set(value) != {'schema', 'heads', 'coverage'} or value['schema'] != 1
                 or value['coverage'] not in ('archive', 'tree')
                 or not isinstance(value['heads'], list)
                 or any(not isinstance(h, str) or not re.fullmatch('[0-9a-f]{64}', h) for h in value['heads'])):
-            raise ValueError('Invalid checkpoint')
+            raise Refused('checkpoint', 'Invalid checkpoint')
         if Path(root).name != 'archives' or value['coverage'] == 'archive':
             required.update(value['heads'])
     present = set()
@@ -203,7 +218,7 @@ def check_anchors(root, archives):
                 regular(path)
                 present.add(sha(path.read_bytes()))
     if required - present:
-        raise ValueError('Missing anchored ledger (archive removed or history truncated): ' +
+        raise Refused('anchor', 'Missing anchored ledger (archive removed or history truncated): ' +
                          ', '.join(sorted(required - present)))
 
 
