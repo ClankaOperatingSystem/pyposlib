@@ -136,6 +136,7 @@ class Sealing(unittest.TestCase):
             plan = seal.stage(b'handover\n', scope / 'archives' / 'journal' / 'h.txt')
             staged = Path(plan['source'])
             self.assertEqual(staged.parent, (scope / '_seal').resolve())
+            self.assertEqual(staged.suffix, '.txt')
             seal.apply(plan, ai.sha(ai.encoded(plan)))
             self.assertFalse(staged.exists())
             self.assertEqual((scope / 'archives/journal/h.txt').read_bytes(), b'handover\n')
