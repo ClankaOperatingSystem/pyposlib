@@ -21,7 +21,8 @@ input or conflict.
 
 * Check
 
-- =make check=: the tests, and poslib's shared fixtures, every one.
+- =make check=: the tests; poslib's shared fixtures, every one; and, with
+  Emacs, poslib itself on random trees, which must give the same bytes.
   The fixtures come from =POSLIB=, a poslib checkout, else from =poslib/=,
   cloned and brought to =POSLIB_REF=, default =master=.
 - =make check-ipfs IPFS=path/to/ipfs=: the CID fixtures against kubo,
