@@ -91,9 +91,10 @@ class Formats(unittest.TestCase):
         if 'error' in fixture:
             self.assertEqual(fixture['error'], refusal(lambda: ai.history(archive)))
             return
-        entries, head, events, _, root, collections = ai.history(archive)
+        entries, head, events, _, root, collections, items = ai.history(archive)
         self.assertEqual((fixture['head'], fixture['events']), (head, events))
         self.assertEqual((fixture['root'], fixture['collections']), (root, collections))
+        self.assertEqual(fixture['items'], items)
         self.assertEqual(ai.encoded(fixture['entries']), ai.encoded(entries))
 
     def ledger_report(self, fixture, root):
