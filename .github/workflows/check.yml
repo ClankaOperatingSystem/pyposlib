@@ -1,0 +1,27 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: purcell/setup-emacs@master
+        with:
+          version: 30.1
+      - run: make check
+      - name: Install kubo, for offline hashing only
+        env:
+          KUBO: v0.43.1
+        run: |
+          curl -fsSLO https://dist.ipfs.tech/kubo/$KUBO/kubo_${KUBO}_linux-amd64.tar.gz
+          curl -fsSL https://dist.ipfs.tech/kubo/$KUBO/kubo_${KUBO}_linux-amd64.tar.gz.sha512 | sha512sum -c
+          tar -xzf kubo_${KUBO}_linux-amd64.tar.gz
+      - run: make check-ipfs IPFS=kubo/ipfs
