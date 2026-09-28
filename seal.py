@@ -19,6 +19,9 @@ Two steps: a plan, reviewed, then its application, named by the plan's hash.
 
     python3 seal.py seal SOURCE DESTINATION   prints a plan
     python3 seal.py write-new DESTINATION     stages stdin, prints a plan
+    python3 seal.py write-new DESTINATION --apply
+                                              for a program writing records itself:
+                                              plans, applies at once, prints both
     python3 seal.py apply PLAN HASH           applies it
 
 Exit 0 done, 2 refused.
@@ -197,13 +200,19 @@ def main(args):
     try:
         if len(args) == 3 and args[0] == 'seal':
             sys.stdout.buffer.write(encoded(plan(args[1], args[2])))
-        elif len(args) == 2 and args[0] == 'write-new':
-            sys.stdout.buffer.write(encoded(stage(sys.stdin.buffer.read(), args[1])))
+        elif args[:1] == ['write-new'] and (len(args) == 2 or args[2:] == ['--apply']):
+            planned = stage(sys.stdin.buffer.read(), args[1])
+            if len(args) == 2:
+                sys.stdout.buffer.write(encoded(planned))
+            else:
+                digest = sha(encoded(planned))
+                event, root = apply(planned, digest)
+                sys.stdout.buffer.write(encoded(dict(plan=planned, hash=digest, event=str(event), root=root)))
         elif len(args) == 3 and args[0] == 'apply':
             event, root = apply(json.loads(Path(args[1]).read_bytes()), args[2])
             sys.stdout.buffer.write(encoded(dict(event=str(event), root=root)))
         else:
-            print('Usage: seal SOURCE DESTINATION | write-new DESTINATION | apply PLAN HASH',
+            print('Usage: seal SOURCE DESTINATION | write-new DESTINATION [--apply] | apply PLAN HASH',
                   file=sys.stderr)
             return 2
         return 0
