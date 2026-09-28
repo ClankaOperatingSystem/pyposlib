@@ -123,5 +123,17 @@ class Sealing(unittest.TestCase):
             self.assertEqual((scope / 'archives/journal/h.md').read_bytes(), b'handover\n')
 
 
+    def test_a_program_applies_its_own_plan_explicitly(self):
+        import subprocess, sys
+        with Scope() as scope:
+            target = scope / 'archives' / 'journal' / 'h.md'
+            command = [sys.executable, '-B', str(Path(seal.__file__)), 'write-new', str(target)]
+            self.assertEqual(0, subprocess.run(command, input=b'handover\n', capture_output=True).returncode)
+            self.assertFalse(target.exists())
+            self.assertEqual(0, subprocess.run(command + ['--apply'], input=b'handover\n',
+                                               capture_output=True).returncode)
+            self.assertEqual(target.read_bytes(), b'handover\n')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
