@@ -37,3 +37,4 @@ poslib:
 	  git -C poslib fetch -q origin $(POSLIB_REF) && \
 	  git -C poslib checkout -q --detach FETCH_HEAD; \
 	fi
+	@if [ -n "$$(command -v $${EMACS:-emacs})" ]; then $(MAKE) -s -C $(POSLIB) deps; fi

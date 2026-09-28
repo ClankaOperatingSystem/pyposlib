@@ -44,7 +44,10 @@ def poslib(tasks):
     with tempfile.TemporaryDirectory() as work:
         request, answer = Path(work) / 'tasks.json', Path(work) / 'answers.json'
         request.write_text(json.dumps(tasks), encoding='utf-8')
-        result = subprocess.run([EMACS, '-Q', '--batch', '-L', str(POSLIB / 'lisp'),
+        # poslib's make deps installs its dependencies into its _deps/.
+        packages = ('(progn (require (quote package)) (setq package-user-dir "%s") '
+                    '(package-initialize))' % (POSLIB.resolve() / '_deps'))
+        result = subprocess.run([EMACS, '-Q', '--batch', '--eval', packages, '-L', str(POSLIB / 'lisp'),
                                  '-l', str(HERE / 'differential.el'), str(request), str(answer)],
                                 capture_output=True, text=True)
         if result.returncode:
@@ -147,7 +150,7 @@ class DifferentialSeal(unittest.TestCase):
     @unittest.skipUnless(shutil.which(EMACS), 'needs Emacs')
     def test_seals_agree_on_random_items(self):
         rng = random.Random(SEED)
-        tasks, ours = [], []
+        tasks, ours, pending = [], [], []
         for i in range(20):
             base = self.work / f'seal-{i}'
             archive = base / 'scope' / 'archives'
@@ -167,7 +170,16 @@ class DifferentialSeal(unittest.TestCase):
             tasks.append(dict(kind='seal', path=str(theirs), **task))
             root = base.resolve()
             try:
-                plan = seal.plan(root / task['source'], root / task['destination'], task['ledger_id'])
+                try:
+                    plan = seal.plan(root / task['source'], root / task['destination'], task['ledger_id'])
+                except ai.Refused as refused:
+                    if refused.kind != 'interpretation':
+                        raise
+                    plan = None  # poslib's to plan; ours to apply, below
+                if plan is None:
+                    pending.append((len(ours), root))
+                    ours.append(None)
+                    continue
                 event, _ = seal.apply(plan, ai.sha(ai.encoded(plan)))
                 ours.append(dict(plan={k: os.path.relpath(v, root)
                                        if k in ('source', 'destination', 'archive', 'ledger') else v
@@ -176,7 +188,18 @@ class DifferentialSeal(unittest.TestCase):
                                  report=relative(ai.report(root), root)))
             except ai.Refused as refused:
                 ours.append('refused:' + refused.kind)
-        self.assertEqual(ai.encoded(ours), ai.encoded(poslib(tasks)))
+        theirs = poslib(tasks)
+        for at, root in pending:
+            # Apply poslib's plan to our own copy, and compare what follows.
+            plan = {k: str(root / v) if k in ('source', 'destination', 'archive', 'ledger') else v
+                    for k, v in theirs[at]['plan'].items()}
+            try:
+                event, _ = seal.apply(plan, ai.sha(ai.encoded(plan)))
+                ours[at] = dict(plan=theirs[at]['plan'], event=event.read_bytes().decode(),
+                                report=relative(ai.report(root), root))
+            except ai.Refused as refused:
+                ours[at] = 'refused:' + refused.kind
+        self.assertEqual(ai.encoded(ours), ai.encoded(theirs))
 
 
 if __name__ == '__main__':

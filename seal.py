@@ -125,11 +125,14 @@ def plan(source, destination, ledger_id=None):
     diff = ai.differences(known, compared)
     if diff['missing'] or diff['changed']:
         raise Refused('differs', f"Existing evidence differs in {archive}: {diff['missing']} {diff['changed']}")
-    return dict(schema=1, operation='seal', source=str(source), destination=str(destination),
+    held = item_files(source, rel)
+    if any(p.endswith(('.org', '.md')) for p in held):
+        raise Refused('interpretation', f'Links in Org and Markdown are poslib\'s to resolve: {source}')
+    return dict(schema=2, operation='seal', source=str(source), destination=str(destination),
                 archive=str(archive), ledger=str(ledger_folder(archive)), number=events + 1,
                 previous=head, ledger_id=last_id(files) or ledger_id or str(uuid.uuid4()),
-                add=entries_of(item_files(source, rel)), collections=sorted(collections(source, rel)),
-                inventory_sha256=sha(encoded(actual)))
+                add=entries_of(held), collections=sorted(collections(source, rel)),
+                links=[], originals={}, rumours=[], inventory_sha256=sha(encoded(actual)))
 
 
 def stage(data, destination, ledger_id=None):
@@ -159,42 +162,102 @@ def checkpoint(archive, head):
         ai.new_file(path, data)
 
 
+def rewrite(data, rewrites):
+    """data with each (offset, from, to) of rewrites applied; from must be at offset."""
+    for offset, old, new in sorted(rewrites, reverse=True):
+        old, new = old.encode(), new.encode()
+        if data[offset:offset + len(old)] != old:
+            raise Refused('plan', f'Link not where it was planned, at byte {offset}')
+        data = data[:offset] + new + data[offset + len(old):]
+    return data
+
+
+def write_event(plan, destination, add, collections):
+    """Write the schema 2 event sealing add at destination; its hash."""
+    archive, ledger = Path(plan['archive']), Path(plan['ledger'])
+    head, events = ai.history(archive)[1:3]
+    data = encoded(dict(schema=2, previous=head, ledger_id=plan['ledger_id'],
+                        item=os.path.relpath(destination, archive), add=add,
+                        root=cid.cid_directory(archive), collections=collections))
+    ai.new_file(ledger / f'{events + 1:08}-{sha(data)}.json', data)
+    return sha(data)
+
+
+def sealed_so_far(plan):
+    """The items plan's events have sealed so far; a stranger's is refused."""
+    archive = Path(plan['archive'])
+    files = ai.history(archive)[3]
+    hashes = [sha(f.read_bytes()) for f in files]
+    if plan['previous'] is None:
+        since = files
+    elif plan['previous'] in hashes:
+        since = files[hashes.index(plan['previous']) + 1:]
+    else:
+        raise Refused('plan', f'Ledger changed since review: {archive}')
+    expected = [r['destination'] for r in plan['rumours']] + [
+        os.path.relpath(plan['destination'], archive)]
+    sealed = [json.loads(f.read_bytes()).get('item') for f in since]
+    if sealed != expected[:len(sealed)]:
+        raise Refused('plan', f'Ledger changed since review: {archive}')
+    return sealed
+
+
+def rewrite_source(plan):
+    """Rewrite the links in the plan's item where it lies, unless done already."""
+    source, archive = Path(plan['source']), Path(plan['archive'])
+    rel = os.path.relpath(plan['destination'], archive)
+    for path, original in plan['originals'].items():
+        file = source if path == rel else source / path[len(rel) + 1:]
+        data = file.read_bytes()
+        if sha(data) == original:
+            mode = file.stat().st_mode & 0o7777
+            file.write_bytes(rewrite(data, [(l['offset'], l['from'], l['to']) for l in plan['links']
+                                            if l['file'] == path and l['from'] != l['to']]))
+            file.chmod(mode)
+        elif sha(data) != plan['add'][path]['sha256']:
+            raise Refused('plan', f'Item changed since review: {file}')
+
+
 def apply(plan, expected):
-    """Apply plan, whose canonical JSON has the SHA-256 expected; return (event, root)."""
+    """Apply plan, whose canonical JSON has the SHA-256 expected: its rumours, then
+    its item, links rewritten; return (event, root)."""
     if sha(encoded(plan)) != expected:
         raise Refused('plan', 'Reviewed plan hash mismatch')
-    if plan.get('schema') != 1 or plan.get('operation') != 'seal':
+    if plan.get('schema') != 2 or plan.get('operation') != 'seal':
         raise Refused('plan', 'Not a seal plan')
     source, destination = Path(plan['source']), Path(plan['destination'])
-    archive, ledger = Path(plan['archive']), Path(plan['ledger'])
-    moved = not source.exists() and destination.exists()
-    if not moved:
-        if not (source.exists() and not destination.exists()):
-            raise Refused('plan', f'Neither before nor after the move: {source}')
+    archive = Path(plan['archive'])
+    rel = os.path.relpath(destination, archive)
+    sealed = sealed_so_far(plan)
+    if not sealed and not destination.exists():
         if sha(encoded(ai.inventory(archive))) != plan['inventory_sha256']:
             raise Refused('plan', f'Archive changed since review: {archive}')
-        rel = os.path.relpath(destination, archive)
+    for rumour in plan['rumours']:
+        there = archive / rumour['destination']
+        if rumour['destination'] in sealed:
+            continue
+        if not there.exists():
+            ai.new_file(there, rumour['text'].encode())
+        if there.read_bytes() != rumour['text'].encode():
+            raise Refused('plan', f'Rumour differs from its plan: {there}')
+        write_event(plan, there, entries_of({rumour['destination']: there}), [])
+    if not destination.exists():
+        if not source.exists():
+            raise Refused('plan', f'Neither before nor after the move: {source}')
+        rewrite_source(plan)
         if encoded(plan['add']) != encoded(entries_of(item_files(source, rel))):
             raise Refused('plan', f'Item changed since review: {source}')
         destination.parent.mkdir(parents=True, exist_ok=True)
         os.rename(source, destination)
-    now = entries_of({path: archive / path for path in plan['add']})
-    if encoded(plan['add']) != encoded(now):
+    if encoded(plan['add']) != encoded(entries_of({p: archive / p for p in plan['add']})):
         raise Refused('plan', f'Item changed after the move: {destination}')
-    root = cid.cid_directory(archive)
-    data = encoded(dict(schema=2, previous=plan['previous'], ledger_id=plan['ledger_id'],
-                        item=os.path.relpath(destination, archive),
-                        add=plan['add'], root=root, collections=plan['collections']))
-    event = ledger / f"{plan['number']:08}-{sha(data)}.json"
-    head, events = ai.history(archive)[1:3]
-    if not (head == sha(data) and events == plan['number']):
-        if head != plan['previous'] or events + 1 != plan['number']:
-            raise Refused('plan', f'Ledger changed since review: {archive}')
-        ai.new_file(event, data)
-    for path in plan['add']:
+    if rel not in sealed:
+        write_event(plan, destination, plan['add'], plan['collections'])
+    for path in [*plan['add'], *(r['destination'] for r in plan['rumours'])]:
         protect(archive / path)
-    checkpoint(archive, sha(data))
-    return event, root
+    files = ai.history(archive)[3]
+    checkpoint(archive, sha(files[-1].read_bytes()))
+    return files[-1], json.loads(files[-1].read_bytes())['root']
 
 
 def main(args):
