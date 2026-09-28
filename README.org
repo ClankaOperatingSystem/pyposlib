@@ -6,6 +6,7 @@ Python library for a personal OS in Org files, beside the Emacs Lisp
 - =archive_integrity.py= :: archive integrity ledgers: hash-chained,
   additive events per =archives/=, write bits removed from enrolled files,
   checkpoints of ledger heads.
+- =cid.py= :: IPFS CIDs of files and trees, computed locally.
 - =test/= :: unittest tests.
 
 * Use
