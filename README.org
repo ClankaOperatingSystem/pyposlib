@@ -1,7 +1,8 @@
 #+TITLE: pyposlib
 
 Python library for a personal OS in Org files, beside the Emacs Lisp
-[[https://github.com/monkeypants/poslib][poslib]]: two implementations of the same formats.
+[[https://github.com/monkeypants/poslib][poslib]]: two implementations, in lockstep, of the formats poslib's
+=doc/formats.org= specifies. Org interpretation is poslib's alone.
 
 - =archive_integrity.py= :: archive integrity ledgers: hash-chained,
   additive events per =archives/=, write bits removed from enrolled files,
@@ -20,7 +21,11 @@ input or conflict.
 
 * Check
 
-- =make check=: the tests, in temporary directories.
+- =make check=: the tests, and poslib's shared fixtures, every one.
+  The fixtures come from =POSLIB=, a poslib checkout, else from =poslib/=,
+  cloned and brought to =POSLIB_REF=, default =master=.
+- =make check-ipfs IPFS=path/to/ipfs=: the CID fixtures against kubo,
+  offline, with the unixfs-v1-2025 profile.
 
 * Licence
 
