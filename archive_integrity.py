@@ -145,6 +145,59 @@ def is_cid(value):
     return isinstance(value, str) and re.fullmatch('b[a-z2-7]+', value) is not None
 
 
+def valid_entry(entry, schema):
+    fields = {'sha256', 'size', 'mode', 'cid'} if schema == 2 else {'sha256', 'size', 'mode'}
+    return (isinstance(entry, dict) and set(entry) == fields
+            and (schema != 2 or is_cid(entry['cid']))
+            and isinstance(entry['sha256'], str) and re.fullmatch('[0-9a-f]{64}', entry['sha256']) is not None
+            and isinstance(entry['size'], int) and entry['size'] >= 0
+            and isinstance(entry['mode'], int) and not entry['mode'] & 0o222)
+
+
+def convert_entries(entries, event, path):
+    """entries after the conversion event in path; refused unless it removes,
+    renames or converts every legacy entry, each from its fingerprint, and adds
+    only new paths."""
+    def bad():
+        raise Refused('entry', f'Invalid conversion: {path}')
+
+    def is_safe(name):
+        try:
+            safe(name)
+            return True
+        except Refused:
+            return False
+    legacy = {p: e for p, e in entries.items() if 'cid' not in e}
+    remove, rename, convert, add = event['remove'], event['rename'], event['convert'], event['add']
+    if not (isinstance(remove, list) and isinstance(rename, dict) and isinstance(convert, dict)
+            and isinstance(add, dict)):
+        bad()
+    if not all(p in legacy for p in remove):
+        bad()
+    if not all(p in legacy and p not in remove and isinstance(n, str) and is_safe(n)
+               for p, n in rename.items()):
+        bad()
+    kept = {p: e for p, e in entries.items() if p not in remove}
+    moved = {rename.get(p, p): e for p, e in kept.items()}
+    if len(moved) != len(kept):
+        bad()
+    for new_path, old in moved.items():
+        if 'cid' not in old:
+            new = convert.get(new_path)
+            if not (isinstance(new, dict) and new.get('from') == old['sha256']
+                    and valid_entry({k: v for k, v in new.items() if k != 'from'}, 2)):
+                bad()
+    if not all(p in moved and 'cid' not in moved[p] for p in convert):
+        bad()
+    result = {p: ({k: v for k, v in convert[p].items() if k != 'from'} if p in convert else e)
+              for p, e in moved.items()}
+    for name, entry in add.items():
+        if not (is_safe(name) and name not in result and valid_entry(entry, 2)):
+            bad()
+        result[name] = entry
+    return result
+
+
 def history(archive):
     """entries, head, events, files, recorded root, collections, items."""
     folder = ledger_folder(archive)
@@ -153,7 +206,7 @@ def history(archive):
     if folder.is_symlink() or not folder.is_dir():
         raise Refused('ledger', f'Invalid ledger: {folder}')
     entries, previous, files, ledger_id = {}, None, [], None
-    schema, root, collections, items = None, None, set(), []
+    schema, root, collections, items, converted = None, None, set(), [], False
     for number, path in enumerate(sorted(folder.iterdir()), 1):
         regular(path)
         data = path.read_bytes()
@@ -162,15 +215,20 @@ def history(archive):
             raise Refused('sequence', f'Ledger sequence/hash failure: {path}')
         event = json.loads(data)
         keys = set(event) if isinstance(event, dict) else set()
+        conversion = (event.get('schema') == 2 and event.get('kind') == 'conversion'
+                      and keys == {'schema', 'kind', 'previous', 'ledger_id', 'remove', 'rename',
+                                   'convert', 'add', 'collections', 'root'}
+                      and not converted and any('cid' not in e for e in entries.values()))
         if not ((event.get('schema') == 1 and schema != 2
                  and keys in ({'schema', 'previous', 'add'}, {'schema', 'previous', 'add', 'ledger_id'}))
                 or (event.get('schema') == 2
-                    and keys == {'schema', 'previous', 'add', 'ledger_id', 'root', 'collections', 'item'})) \
+                    and keys == {'schema', 'previous', 'add', 'ledger_id', 'root', 'collections', 'item'})
+                or conversion) \
                 or event['previous'] != previous:
             raise Refused('chain', f'Ledger chain failure: {path}')
         schema = event['schema']
         root = event.get('root')
-        if schema == 2:
+        if schema == 2 and not conversion:
             listed, item = event['collections'], event['item']
 
             def within(p):
@@ -197,6 +255,22 @@ def history(archive):
             ledger_id = event_id
         elif ledger_id is not None:
             raise Refused('identity', 'Ledger identity removed')
+        if conversion:
+            entries = convert_entries(entries, event, path)
+            converted = True
+            listed = event['collections']
+            if (not is_cid(root) or not isinstance(listed, list)
+                    or not all(isinstance(c, str) for c in listed) or listed != sorted(set(listed))):
+                raise Refused('entry', f'Invalid root or collections: {path}')
+            for name in listed:
+                try:
+                    safe(name)
+                except Refused:
+                    raise Refused('entry', f'Invalid root or collections: {path}')
+            collections.update(listed)
+            previous = sha(data)
+            files.append(path)
+            continue
         if not isinstance(event['add'], dict):
             raise Refused('entry', 'Invalid ledger additions')
         for name, entry in event['add'].items():
