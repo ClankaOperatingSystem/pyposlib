@@ -26,9 +26,13 @@ FIXTURES = POSLIB / 'fixtures'
 
 
 def fixtures(kind):
-    """The fixtures of kind, a subdirectory, as (name, fixture) sorted by name."""
-    return [(p.stem, json.loads(p.read_text(encoding='utf-8')))
-            for p in sorted((FIXTURES / kind).glob('*.json'))]
+    """The fixtures of kind, a subdirectory, as (name, fixture) sorted by name.
+    None found is an error, so that a missing checkout cannot pass."""
+    found = [(p.stem, json.loads(p.read_text(encoding='utf-8')))
+             for p in sorted((FIXTURES / kind).glob('*.json'))]
+    if not found:
+        raise FileNotFoundError(f'No {kind} fixtures in {FIXTURES}')
+    return found
 
 
 def fixture_bytes(entry):
