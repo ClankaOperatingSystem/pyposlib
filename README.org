@@ -1,0 +1,26 @@
+#+TITLE: pyposlib
+
+Python library for a personal OS in Org files, beside the Emacs Lisp
+[[https://github.com/monkeypants/poslib][poslib]]: two implementations of the same formats.
+
+- =archive_integrity.py= :: archive integrity ledgers: hash-chained,
+  additive events per =archives/=, write bits removed from enrolled files,
+  checkpoints of ledger heads.
+- =test/= :: unittest tests.
+
+* Use
+
+: python3 archive_integrity.py --help
+: python3 archive_integrity.py check ROOT
+
+Commands: =check=, =preview=, =apply=, =repair=, =verify-existing=,
+=checkpoint=, =seal=, =write-new=. Exit 0 clean, 1 findings, 2 invalid
+input or conflict.
+
+* Check
+
+- =make check=: the tests, in temporary directories.
+
+* Licence
+
+GPL-3.0-or-later. See =LICENSE=.
