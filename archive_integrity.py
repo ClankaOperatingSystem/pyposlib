@@ -406,10 +406,22 @@ def findings(report):
                 or (report['recorded_root'] is not None and report['recorded_root'] != report['root']))
 
 
+def capsule(directory):
+    """Whether directory holds a capsule's manifest: schema_version 1, entries, entrypoint."""
+    manifest = directory / 'manifest.json'
+    try:
+        value = json.loads(manifest.read_bytes()) if manifest.is_file() else None
+    except ValueError:
+        return False
+    return (isinstance(value, dict) and value.get('schema_version') == 1
+            and 'entries' in value and 'entrypoint' in value)
+
+
 def declared(directory):
-    """Whether directory's README.org has the declaration line."""
+    """Whether directory declares itself a collection: its README.org has the
+    declaration line, or it is a capsule."""
     readme = directory / 'README.org'
-    return readme.is_file() and DECLARATION in readme.read_bytes().split(b'\n')
+    return (readme.is_file() and DECLARATION in readme.read_bytes().split(b'\n')) or capsule(directory)
 
 
 def preview(root, target=None):
