@@ -139,13 +139,14 @@ def plan(source, destination, ledger_id=None):
 
 
 def stage(data, destination, ledger_id=None):
-    """Stage data, a new record, beside the archive in _seal/, and plan to seal it."""
+    """Stage data, a new record, beside the archive in _seal/, with destination's
+    extension, and plan to seal it."""
     archive = outermost_archive(Path(os.path.abspath(destination)))
     if archive is None:
         raise Refused('destination', f'Destination is not in an archive: {destination}')
     folder = archive.parent / '_seal'
     folder.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix='new-', dir=folder)
+    fd, name = tempfile.mkstemp(prefix='new-', suffix=Path(destination).suffix, dir=folder)
     with os.fdopen(fd, 'wb') as stream:
         stream.write(data)
     os.chmod(name, 0o644)
