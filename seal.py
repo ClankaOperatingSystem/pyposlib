@@ -120,7 +120,7 @@ def plan(source, destination, ledger_id=None):
         raise Refused('sealed', f'Destination is within sealed {within}: {rel}')
     actual = ai.inventory(archive)
     try:
-        cids = cid.cid_tree(archive)
+        cids = cid.cid_tree(archive) if archive.exists() else {}
     except cid.ShardingUnsupported:
         cids = None
     compared = {n: dict(e, cid=cids.get(n)) if cids is not None and 'cid' in known.get(n, {}) else e
@@ -140,7 +140,7 @@ def plan(source, destination, ledger_id=None):
 
 def stage(data, destination, ledger_id=None):
     """Stage data, a new record, beside the archive in _seal/, with destination's
-    extension, and plan to seal it."""
+    extension, and plan to seal it. If planning fails, nothing is left staged."""
     archive = outermost_archive(Path(os.path.abspath(destination)))
     if archive is None:
         raise Refused('destination', f'Destination is not in an archive: {destination}')
@@ -150,7 +150,13 @@ def stage(data, destination, ledger_id=None):
     with os.fdopen(fd, 'wb') as stream:
         stream.write(data)
     os.chmod(name, 0o644)
-    return plan(name, destination, ledger_id)
+    try:
+        return plan(name, destination, ledger_id)
+    except Exception:
+        os.remove(name)
+        if not any(folder.iterdir()):
+            folder.rmdir()
+        raise
 
 
 def protect(path):

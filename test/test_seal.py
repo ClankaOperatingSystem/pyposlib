@@ -142,6 +142,22 @@ class Sealing(unittest.TestCase):
             self.assertEqual((scope / 'archives/journal/h.txt').read_bytes(), b'handover\n')
 
 
+    def test_a_new_record_may_start_an_archive(self):
+        with Scope() as scope:
+            (scope / 'archives').rmdir()
+            plan = seal.stage(b'first\n', scope / 'archives' / 'first.txt')
+            self.assertEqual(plan['number'], 1)
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            self.assertEqual((scope / 'archives' / 'first.txt').read_bytes(), b'first\n')
+            self.assertTrue((scope / 'archive-integrity' / 'ledger').is_dir())
+
+    def test_a_refused_new_record_leaves_nothing_staged(self):
+        with Scope() as scope:
+            write(scope / 'archives' / 'taken.txt', b'taken')
+            with self.assertRaises(ai.Refused):
+                seal.stage(b'new\n', scope / 'archives' / 'taken.txt')
+            self.assertFalse((scope / '_seal').exists())
+
     def test_a_program_applies_its_own_plan_explicitly(self):
         import subprocess, sys
         with Scope() as scope:
