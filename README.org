@@ -7,27 +7,24 @@ Python library for a personal OS in Org files, beside the Emacs Lisp
 - =archive_integrity.py= :: archive integrity ledgers: hash-chained,
   additive events for each =archives/=, kept beside it in
   =archive-integrity/=; write bits removed from enrolled files;
-  checkpoints of ledger heads. Its writing commands write schema 1 events,
-  which a converted ledger refuses.
+  checkpoints of ledger heads; and the command line, poslib's.
 - =cid.py= :: IPFS CIDs of files and trees, computed locally.
 - =seal.py= :: sealing items into archives: a plan, reviewed, then applied.
 - =test/= :: unittest tests.
 
 * Use
 
-: python3 archive_integrity.py --help
+The command line is poslib's =pos-seal-batch=, command for command:
+
+: python3 archive_integrity.py help
 : python3 archive_integrity.py check ROOT
+: python3 archive_integrity.py seal SOURCE DESTINATION > plan.json
+: python3 archive_integrity.py apply plan.json "$(shasum -a 256 plan.json | cut -d' ' -f1)"
 
-Commands: =check=, =preview=, =apply=, =repair=, =verify-existing=,
-=checkpoint=, =seal=, =write-new=. Exit 0 clean, 1 findings, 2 invalid
-input or conflict.
-
-Sealing, in two steps:
-
-: python3 seal.py seal SOURCE DESTINATION > plan.json
-: python3 seal.py apply plan.json "$(shasum -a 256 plan.json | cut -d' ' -f1)"
-
-=write-new DESTINATION= plans a new record from standard input.
+Commands: =seal SOURCE DESTINATION [--apply]=, =write-new DESTINATION
+[--apply]= (the record on standard input), =apply PLAN HASH=, =check ROOT=,
+=checkpoint ROOT=, =repair ROOT= and =help=. Exit 0 done or clean, 1
+findings, 2 refused.
 
 * Check
 

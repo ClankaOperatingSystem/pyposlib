@@ -97,7 +97,7 @@ class Sealing(unittest.TestCase):
                 if 'error' in fixture:
                     # A refusal found in links is poslib's; pyposlib does not read them.
                     allowed = {fixture['error']} | (
-                        {'interpretation'} if fixture['error'] in ('broken', 'unsealed', 'unresolved', 'loop')
+                        {'interpretation'} if fixture['error'] in ('unsealed', 'unresolved', 'loop')
                         else set())
                     self.assertIn(got.get('error'), allowed)
                     continue

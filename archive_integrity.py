@@ -22,11 +22,11 @@ archives/.archive-integrity/, is still read. Nested historical archives,
 ledgers included, are ordinary preserved bytes, so a retired scope's archive
 moves unchanged into its parent's.
 
-check and verify-existing read either ledger schema. preview, apply, seal and
-write-new write schema 1 events, which a ledger converted to schema 2 refuses;
-seal a converted archive with poslib.
+The command line is poslib's pos-seal-batch, command for command: seal.py
+seals; check, checkpoint and repair are here, and read either ledger schema.
+The schema 1 writers, preview, apply_plan and seal_archive, remain only to
+build legacy ledgers in the tests; a converted ledger refuses them.
 """
-import argparse
 import hashlib
 import json
 import os
@@ -542,7 +542,7 @@ def repair(root):
     """Protect only verified enrolled files; never enrol or accept changed bytes."""
     checks = report(root)
     if any(r['changed'] or r['missing'] for r in checks):
-        raise ValueError('Integrity discrepancy: permission repair refused; retain evidence')
+        raise Refused('differs', f'Evidence changed or is missing; repair refused: {root}')
     count = 0
     for item in checks:
         archive = Path(item['archive'])
@@ -606,70 +606,62 @@ only permissions are changed there. Call with the final published path.
                 file.chmod(stat.S_IMODE(regular(file).st_mode) & ~0o222)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, epilog=(
-        'Exit 0: success/clean; 1: findings; 2: invalid input or conflict. '
-        'No Git, network or editor writes. Keep preview output outside archives, and retain '
-        'the plan hash independently. One writer; stop concurrent archive writers.'),
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = parser.add_subparsers(dest='command', required=True)
-    for name, text in (
-            ('check', 'report changed, missing, unregistered and writable files under ROOT'),
-            ('preview', 'print a plan enrolling unregistered files under ROOT; writes nothing'),
-            ('repair', 'remove write bits from verified enrolled files only; never enrols'),
-            ('verify-existing', 'refuse if any enrolled file under ROOT changed or is missing'),
-            ('checkpoint', 'record ledger heads beside ROOT, once it is clean')):
-        command = sub.add_parser(name, help=text)
-        command.add_argument('root')
-    command = sub.add_parser('apply', help='apply a reviewed plan: ledger events, then write bits removed')
-    command.add_argument('plan')
-    command.add_argument('--expect', required=True, help="the plan's reviewed SHA-256")
-    command = sub.add_parser('seal', help='writer hook: enrol one output already published in an archive')
-    command.add_argument('path')
-    command = sub.add_parser('write-new', help='publish a new archive file from stdin; refuse replacement')
-    command.add_argument('path')
-    args = parser.parse_args()
+USAGE = """Usage: COMMAND ...  (help prints this; Emacs itself takes --help)
+
+  seal SOURCE DESTINATION [--apply]
+      print the plan to seal SOURCE at DESTINATION, in an archive
+  write-new DESTINATION [--apply]
+      print the plan to seal a new record, read from standard input
+  apply PLAN HASH
+      apply a reviewed plan, named by its hash
+  check ROOT
+      report every archive under ROOT, as JSON
+  checkpoint ROOT
+      record the ledger heads under ROOT, once the check is clean
+  repair ROOT
+      remove write bits from verified evidence; never enrols
+
+--apply applies a program's own plan at once and prints both.
+Exit 0 done or clean, 1 findings, 2 refused.
+"""
+
+
+def checkpoint_root(root):
+    """Record the ledger heads under root once the check is clean; return where."""
+    checks = report(root)
+    if any(r['changed'] or r['missing'] or r['new'] or r['writable'] or r['checkpoint_writable']
+           for r in checks):
+        raise Refused('unclean', f'Enrol new records and restore permissions before checkpointing: {root}')
+    checkpoint_heads(root)
+    return anchor_home(root)
+
+
+def main(args=None):
+    """The command line poslib's pos-seal-batch has, command for command."""
+    args = sys.argv[1:] if args is None else args
+    if args[:1] in (['seal'], ['write-new'], ['apply']):
+        import seal
+        return seal.main(args)
     try:
-        if args.command == 'check':
-            result = report(args.root)
-            print(json.dumps(result, indent=2))
-            return int(any(findings(r) for r in result))
-        if args.command == 'preview':
-            print(encoded(preview(args.root)).decode(), end='')
+        if args in (['help'], ['-h'], ['--help']):
+            sys.stdout.write(USAGE)
             return 0
-        if args.command == 'apply':
-            result = apply_plan(json.loads(Path(args.plan).read_bytes()), args.expect)
-        elif args.command == 'checkpoint':
-            checks = report(args.root)
-            if any(r['new'] or r['writable'] or r['checkpoint_writable'] for r in checks):
-                raise ValueError('Enrol new records and restore permissions before checkpointing')
-            verify_existing(args.root)
-            checkpoint_heads(args.root)
-            result = dict(checkpointed=str(anchor_home(args.root)))
-        elif args.command == 'verify-existing':
-            result = verify_existing(args.root)
-        elif args.command == 'repair':
-            result = repair(args.root)
-        elif args.command == 'write-new':
-            path = checked(args.path)
-            archive = archive_for(path)
-            if archive is None:
-                raise ValueError('write-new requires an archives/ destination')
-            # Reject ancestor links before creating anything.
-            for parent in [path, *path.parents]:
-                if parent.resolve() == archive.parent:
-                    break
-                if parent.is_symlink():
-                    raise ValueError('Symlink in publication path')
-            new_file(path, sys.stdin.buffer.read())
-            seal_archive(path)
-            result = dict(path=str(path), sha256=record(path)['sha256'])
-        else:
-            seal_archive(args.path)
-            result = dict(sealed=args.path)
-        print(json.dumps(result, indent=2))
-        return 0
-    except (ValueError, OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        if len(args) == 2 and args[0] == 'check':
+            result = report(args[1])
+            sys.stdout.buffer.write(encoded(result))
+            return int(any(findings(r) for r in result))
+        if len(args) == 2 and args[0] == 'checkpoint':
+            sys.stdout.buffer.write(encoded(dict(checkpointed=str(checkpoint_root(args[1])))))
+            return 0
+        if len(args) == 2 and args[0] == 'repair':
+            sys.stdout.buffer.write(encoded(repair(args[1])))
+            return 0
+        sys.stderr.write(USAGE)
+        return 2
+    except Refused as refused:
+        print(f'{refused.kind}: {refused}', file=sys.stderr)
+        return 2
+    except (ValueError, OSError) as error:
         print(str(error), file=sys.stderr)
         return 2
 

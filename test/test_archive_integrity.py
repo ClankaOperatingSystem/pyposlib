@@ -190,16 +190,32 @@ class IntegrityChecks(unittest.TestCase):
         apply_plan(plan, sha(encoded(plan)))
         self.assertTrue(all(not r['new'] and not r['writable'] for r in report(self.root)))
 
-    def test_cli_new_publication_refuses_replacement_and_ignores_active_scratch(self):
-        tool = HOME / 'archive_integrity.py'
-        archive = self.root / 'projects/A/archives'
-        new = archive / 'new.md'
-        command = [sys.executable, '-B', str(tool), 'write-new', str(new)]
-        result = subprocess.run(command, input=b'New record', capture_output=True)
+    def test_cli_is_poslib_s(self):
+        """The command line is poslib's: a new record sealed at once, never
+        replaced; check, checkpoint and repair; help; the old commands gone."""
+        tool = [sys.executable, '-B', str(HOME / 'archive_integrity.py')]
+        scope = self.root / 'fresh'
+        (scope / 'archive-integrity').mkdir(parents=True)
+        new = scope / 'archives' / 'new.txt'
+        write_new = [*tool, 'write-new', str(new), '--apply']
+        result = subprocess.run(write_new, input=b'New record', capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        result = subprocess.run(command, input=b'Replacement', capture_output=True)
+        result = subprocess.run(write_new, input=b'Replacement', capture_output=True)
         self.assertEqual(result.returncode, 2)
         self.assertEqual(new.read_bytes(), b'New record')
+        run = lambda *args: subprocess.run([*tool, *args], capture_output=True)
+        self.assertEqual(run('check', str(scope)).returncode, 0)
+        new.chmod(0o644)
+        self.assertEqual(run('check', str(scope)).returncode, 1)
+        self.assertEqual(json.loads(run('repair', str(scope)).stdout), dict(repaired=1, unregistered=0))
+        checkpointed = json.loads(run('checkpoint', str(scope)).stdout)['checkpointed']
+        self.assertEqual(Path(checkpointed), (scope / 'archive-integrity/checkpoints').resolve())
+        self.assertIn(b'checkpoint ROOT', run('help').stdout)
+        for old in (['preview', str(scope)], ['verify-existing', str(scope)], ['seal', str(new)]):
+            self.assertEqual(run(*old).returncode, 2, old)
+
+    def test_new_publication_ignores_active_scratch(self):
+        archive = self.root / 'projects/A/archives'
         scratch = self.root / '_fixtures/archives'
         scratch.mkdir(parents=True)
         (scratch / 'untracked').write_text('Disposable')
