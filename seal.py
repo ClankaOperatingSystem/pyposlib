@@ -272,8 +272,14 @@ def apply(plan, expected):
 
 def main(args):
     try:
-        if len(args) == 3 and args[0] == 'seal':
-            sys.stdout.buffer.write(encoded(plan(args[1], args[2])))
+        if args[:1] == ['seal'] and (len(args) == 3 or args[3:] == ['--apply'] and len(args) == 4):
+            planned = plan(args[1], args[2])
+            if len(args) == 3:
+                sys.stdout.buffer.write(encoded(planned))
+            else:
+                digest = sha(encoded(planned))
+                event, root = apply(planned, digest)
+                sys.stdout.buffer.write(encoded(dict(plan=planned, hash=digest, event=str(event), root=root)))
         elif args[:1] == ['write-new'] and (len(args) == 2 or args[2:] == ['--apply']):
             planned = stage(sys.stdin.buffer.read(), args[1])
             if len(args) == 2:
@@ -286,8 +292,7 @@ def main(args):
             event, root = apply(json.loads(Path(args[1]).read_bytes()), args[2])
             sys.stdout.buffer.write(encoded(dict(event=str(event), root=root)))
         else:
-            print('Usage: seal SOURCE DESTINATION | write-new DESTINATION [--apply] | apply PLAN HASH',
-                  file=sys.stderr)
+            sys.stderr.write(ai.USAGE)
             return 2
         return 0
     except Refused as refused:
