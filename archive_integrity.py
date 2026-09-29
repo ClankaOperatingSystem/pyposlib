@@ -15,9 +15,16 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """Saved-byte archive integrity. No Org interpretation, Git, or editor access.
 
-One writer. Each outermost archives/ keeps additive hash-chained event files.
-Nested historical archives (including their ledgers) are ordinary preserved bytes.
-Thus a project's existing archive ledger moves unchanged when its parent retires it.
+One writer. Each outermost archives/ has a ledger of additive, hash-chained
+events in archive-integrity/ledger/ beside it, and checkpoints of ledger heads
+in archive-integrity/checkpoints/; a legacy ledger inside the archive, in
+archives/.archive-integrity/, is still read. Nested historical archives,
+ledgers included, are ordinary preserved bytes, so a retired scope's archive
+moves unchanged into its parent's.
+
+check and verify-existing read either ledger schema. preview, apply, seal and
+write-new write schema 1 events, which a ledger converted to schema 2 refuses;
+seal a converted archive with poslib.
 """
 import argparse
 import hashlib
@@ -602,18 +609,22 @@ only permissions are changed there. Call with the final published path.
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog=(
         'Exit 0: success/clean; 1: findings; 2: invalid input or conflict. '
-        'preview/check read saved bytes; apply adds immutable ledger events and removes write bits; '
-        'repair removes write bits only from verified enrolled files. No Git/network/editor writes. '
-        'Keep preview output outside archives. Retain the returned plan hash independently. '
-        'One writer; stop concurrent archive writers. No live-editor counterpart is installed.'))
+        'No Git, network or editor writes. Keep preview output outside archives, and retain '
+        'the plan hash independently. One writer; stop concurrent archive writers.'),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('check', 'preview', 'repair', 'verify-existing', 'checkpoint'):
-        command = sub.add_parser(name)
+    for name, text in (
+            ('check', 'report changed, missing, unregistered and writable files under ROOT'),
+            ('preview', 'print a plan enrolling unregistered files under ROOT; writes nothing'),
+            ('repair', 'remove write bits from verified enrolled files only; never enrols'),
+            ('verify-existing', 'refuse if any enrolled file under ROOT changed or is missing'),
+            ('checkpoint', 'record ledger heads beside ROOT, once it is clean')):
+        command = sub.add_parser(name, help=text)
         command.add_argument('root')
-    command = sub.add_parser('apply')
+    command = sub.add_parser('apply', help='apply a reviewed plan: ledger events, then write bits removed')
     command.add_argument('plan')
-    command.add_argument('--expect', required=True)
-    command = sub.add_parser('seal', help='publication hook for existing archive writers')
+    command.add_argument('--expect', required=True, help="the plan's reviewed SHA-256")
+    command = sub.add_parser('seal', help='writer hook: enrol one output already published in an archive')
     command.add_argument('path')
     command = sub.add_parser('write-new', help='publish a new archive file from stdin; refuse replacement')
     command.add_argument('path')
