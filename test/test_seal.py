@@ -23,6 +23,7 @@ import unittest
 from fixtures import fixtures, write, writable
 from test_formats import Built
 from pyposlib import archive_integrity as ai
+from pyposlib import cid
 from pyposlib import seal
 
 
@@ -88,6 +89,16 @@ def trial_plan(scope):
 
 
 class Sealing(unittest.TestCase):
+    def test_the_ledger_alone_gives_the_archive_s_cids(self):
+        """After a seal, the ledger's entries give every CID the archive on
+        disk has, root included, without reading the archive."""
+        with Scope() as scope:
+            plan = trial_plan(scope)
+            _, root = seal.apply(plan, ai.sha(ai.encoded(plan)))
+            archive = scope / 'archives'
+            self.assertEqual(cid.cid_tree(archive), ai.fold_cids(archive))
+            self.assertEqual(root, ai.fold_cids(archive)['.'])
+
     def test_every_shared_fixture_seals_the_same_bytes(self):
         for name, fixture in fixtures('ledger'):
             if fixture['kind'] != 'seal':

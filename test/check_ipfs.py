@@ -68,6 +68,27 @@ def main(program):
             finally:
                 writable(root)
                 shutil.rmtree(root)
+        for name, fixture in fixtures('inventory'):
+            root = Path(tempfile.mkdtemp(prefix='pyposlib-ipfs-'))
+            try:
+                build(fixture, root)
+                path = root / fixture['entry']
+                params = fixture.get('params', {})
+                flags = ['--recursive'] + \
+                    ([f"--chunker=size-{params['chunk']}"] if 'chunk' in params else []) + \
+                    ([f"--max-file-links={params['links']}"] if 'links' in params else [])
+                theirs = kubo(program, repo, 'add', '--quieter', '--only-hash', *flags, str(path))
+                ours = cid.cid_directory(path, chunk_size=params.get('chunk', cid.CHUNK_SIZE),
+                                         max_links=params.get('links', cid.FILE_MAX_LINKS))
+                if theirs == fixture['cids']['.'] == ours:
+                    print(f'ok    inventory {name}')
+                else:
+                    failed += 1
+                    print(f"FAIL  inventory {name}: recorded {fixture['cids']['.']}, "
+                          f'kubo {theirs}, ours {ours}')
+            finally:
+                writable(root)
+                shutil.rmtree(root)
     return 1 if failed else 0
 
 
