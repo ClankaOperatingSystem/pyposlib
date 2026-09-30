@@ -27,9 +27,9 @@ import tempfile
 import unittest
 
 from fixtures import POSLIB, HERE, writable, write
-import archive_integrity as ai
-import cid
-import seal
+from pyposlib import archive_integrity as ai
+from pyposlib import cid
+from pyposlib import seal
 
 EMACS = os.environ.get('EMACS', 'emacs')
 SEED = int(os.environ.get('DIFFERENTIAL_SEED', '73'))

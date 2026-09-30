@@ -20,8 +20,8 @@ import tempfile
 import unittest
 
 from fixtures import build, fixtures, writable
-import archive_integrity as ai
-import cid
+from pyposlib import archive_integrity as ai
+from pyposlib import cid
 
 
 class Built:

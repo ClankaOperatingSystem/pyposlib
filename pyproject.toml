@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyposlib"
+version = "0.1.0"
+description = "Archive integrity ledgers, content identifiers and sealing for a personal OS in Org files, in lockstep with poslib"
+readme = { file = "README.org", content-type = "text/plain" }
+license = "GPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/monkeypants/pyposlib"
+Specification = "https://github.com/monkeypants/poslib"
+
+[project.scripts]
+pyposlib = "pyposlib.archive_integrity:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pyposlib"]
+
+[tool.hatch.build.targets.sdist]
+include = ["pyposlib", "test", "archive_integrity.py", "Makefile", "README.org", "LICENSE"]

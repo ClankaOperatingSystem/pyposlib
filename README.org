@@ -4,22 +4,34 @@ Python library for a personal OS in Org files, beside the Emacs Lisp
 [[https://github.com/monkeypants/poslib][poslib]]: two implementations, in lockstep, of the formats poslib's
 =doc/formats.org= specifies. Org interpretation is poslib's alone.
 
+The package is =pyposlib/=:
+
 - =archive_integrity.py= :: archive integrity ledgers: hash-chained,
   additive events for each =archives/=, kept beside it in
   =archive-integrity/=; write bits removed from enrolled files;
   checkpoints of ledger heads; and the command line, poslib's.
 - =cid.py= :: IPFS CIDs of files and trees, computed locally.
 - =seal.py= :: sealing items into archives: a plan, reviewed, then applied.
-- =test/= :: unittest tests.
+
+Beside it, =archive_integrity.py= at the top runs the command line from
+a checkout, and =test/= holds the unittest tests.
 
 * Use
 
-The command line is poslib's =pos-seal-batch=, command for command:
+The command line is poslib's =pos-seal-batch=, command for command.
+From a checkout:
 
 : python3 archive_integrity.py help
 : python3 archive_integrity.py check ROOT
 : python3 archive_integrity.py seal SOURCE DESTINATION > plan.json
 : python3 archive_integrity.py apply plan.json "$(shasum -a 256 plan.json | cut -d' ' -f1)"
+
+Installed, the same commands are =pyposlib ...= or =python -m pyposlib ...=,
+and the library is =from pyposlib import archive_integrity, cid, seal=.
+It needs Python 3.11 or later and nothing outside the standard library.
+Install it from the repository at a tag:
+
+: pip install "pyposlib @ git+https://github.com/monkeypants/pyposlib.git@v0.1.0"
 
 Commands: =seal SOURCE DESTINATION [--apply]=, =write-new DESTINATION
 [--apply]= (the record on standard input), =apply PLAN HASH=, =check ROOT=,

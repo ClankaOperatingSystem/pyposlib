@@ -33,9 +33,9 @@ import sys
 import tempfile
 import uuid
 
-import archive_integrity as ai
-from archive_integrity import Refused, encoded, sha
-import cid
+from . import archive_integrity as ai
+from .archive_integrity import Refused, encoded, sha
+from . import cid
 
 
 def outermost_archive(path):
