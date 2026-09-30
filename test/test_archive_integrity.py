@@ -24,7 +24,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from archive_integrity import (META, apply_plan, encoded, history, inventory,
+from pyposlib.archive_integrity import (META, apply_plan, encoded, history, inventory,
                                preview, record, repair, report, seal_archive, sha)
 
 HOME = Path(__file__).resolve().parent.parent
@@ -180,7 +180,7 @@ class IntegrityChecks(unittest.TestCase):
         plan = preview(self.root)
         request = self.root / 'plan.json'
         request.write_bytes(encoded(plan))
-        program = ("import json,os,sys; from archive_integrity import apply_plan; "
+        program = ("import json,os,sys; from pyposlib.archive_integrity import apply_plan; "
                    "apply_plan(json.load(open(sys.argv[1])), sys.argv[2], "
                    "lambda phase: os._exit(75) if phase == 'after-ledger' else None)")
         result = subprocess.run([sys.executable, '-B', '-c', program, str(request), sha(encoded(plan))],

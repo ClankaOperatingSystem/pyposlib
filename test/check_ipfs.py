@@ -27,7 +27,7 @@ import sys
 import tempfile
 
 from fixtures import build, fixtures, writable
-import cid
+from pyposlib import cid
 
 
 def kubo(program, repo, *args):

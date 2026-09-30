@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # Copyright (C) 2026 Chris Gough
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
@@ -14,18 +13,9 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""The command line, run from a checkout: python3 archive_integrity.py ...
-
-The library is the pyposlib package beside this file. This keeps the
-invocation a checkout has always had; an installed package has the
-pyposlib script and python -m pyposlib.
-"""
-import os
+"""python -m pyposlib: the command line, poslib's command for command."""
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from .archive_integrity import main
 
-from pyposlib.archive_integrity import main  # noqa: E402
-
-if __name__ == '__main__':
-    sys.exit(main())
+sys.exit(main())

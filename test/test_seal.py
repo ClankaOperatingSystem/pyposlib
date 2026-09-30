@@ -22,8 +22,8 @@ import unittest
 
 from fixtures import fixtures, write, writable
 from test_formats import Built
-import archive_integrity as ai
-import seal
+from pyposlib import archive_integrity as ai
+from pyposlib import seal
 
 
 def relative_plan(plan, root):
@@ -162,7 +162,8 @@ class Sealing(unittest.TestCase):
         import subprocess, sys
         with Scope() as scope:
             target = scope / 'archives' / 'journal' / 'h.txt'
-            command = [sys.executable, '-B', str(Path(seal.__file__)), 'write-new', str(target)]
+            tool = Path(__file__).resolve().parent.parent / 'archive_integrity.py'
+            command = [sys.executable, '-B', str(tool), 'write-new', str(target)]
             self.assertEqual(0, subprocess.run(command, input=b'handover\n', capture_output=True).returncode)
             self.assertFalse(target.exists())
             self.assertEqual(0, subprocess.run(command + ['--apply'], input=b'handover\n',
