@@ -378,6 +378,18 @@ def checkpoint_heads(root):
             raise ValueError('Checkpoint conflict')
 
 
+def fold_cids(archive):
+    """The CIDs of archive from its ledger alone, as cid.cid_tree gives them
+    from disk: every enrolled file's as recorded, every directory's derived,
+    the root as '.'. Refuses 'entry' when an enrolled entry records no CID,
+    as a legacy ledger's do."""
+    entries = history(archive)[0]
+    for path, entry in entries.items():
+        if 'cid' not in entry:
+            raise Refused('entry', f'No CID enrolled for {path}')
+    return cid.cid_inventory({path: (entry['cid'], entry['size']) for path, entry in entries.items()})
+
+
 def report(root):
     reports = []
     archives = roots(root)

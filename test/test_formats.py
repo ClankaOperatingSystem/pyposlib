@@ -63,6 +63,47 @@ class Formats(unittest.TestCase):
                     got = 'sharding-unsupported'
                 self.assertEqual(fixture.get('cid') or fixture['error'], got)
 
+    def test_an_inventory_gives_the_cids_of_its_tree(self):
+        """Every fixture in fixtures/inventory/: the tree on disk and the
+        inventory of its files give every CID the fixture records."""
+        for name, fixture in fixtures('inventory'):
+            with self.subTest(name), Built(fixture) as root:
+                params = fixture.get('params', {})
+                limits = dict(chunk_size=params.get('chunk', cid.CHUNK_SIZE),
+                              max_links=params.get('links', cid.FILE_MAX_LINKS))
+                path = root / fixture['entry']
+                self.assertEqual(fixture['cids'], cid.cid_tree(path, **limits))
+                entries = {}
+                for file in path.rglob('*'):
+                    rel = file.relative_to(path)
+                    if file.is_file() and not any(part.startswith('.') for part in rel.parts):
+                        entries[rel.as_posix()] = (cid.cid_file(file, **limits), file.stat().st_size)
+                self.assertEqual(fixture['cids'], cid.cid_inventory(entries, **limits))
+
+    def test_a_cid_decodes_to_the_bytes_it_encodes(self):
+        binary = cid.leaf(b'hello')[0]
+        self.assertEqual(36, len(binary))
+        self.assertEqual(binary, cid.decode(cid.text(binary)))
+        for bad in ('', 'b', 'QmNotBase32', 'BAFKREI'):
+            with self.assertRaises(ValueError):
+                cid.decode(bad)
+
+    def test_a_file_s_dag_size_follows_from_its_size_alone(self):
+        """With 256-byte chunks and 4 links a node, sizes across every shape
+        of DAG give the size the file's real DAG has."""
+        for size in (0, 1, 255, 256, 257, 1024, 1025, 3000, 5000):
+            data = bytes(i % 251 for i in range(size))
+            real = cid.content(size, lambda s, e: data[s:e], 256, 4)[1]
+            self.assertEqual(real, cid.file_tsize(size, 256, 4), size)
+
+    def test_an_inventory_refuses_what_ipfs_would_leave_out(self):
+        given = cid.cid_bytes(b'x')
+        for path in ('.hidden', 'a/.b/c', 'a//b', ''):
+            with self.assertRaises(ValueError):
+                cid.cid_inventory({path: (given, 1)})
+        with self.assertRaises(ValueError):
+            cid.cid_inventory({'a': (given, 1), 'a/b': (given, 1)})
+
     def test_json_is_written_one_way(self):
         for name, fixture in fixtures('json'):
             with self.subTest(name):

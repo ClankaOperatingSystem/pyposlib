@@ -158,3 +158,71 @@ def cid_tree(path, chunk_size=CHUNK_SIZE, max_links=FILE_MAX_LINKS):
     cids = {}
     directory(path, '', lambda rel, node: cids.__setitem__(rel, text(node[0])), chunk_size, max_links)
     return cids
+
+
+def decode(text_cid):
+    """The binary CID of text_cid, a CID in lower-case multibase base32."""
+    body = text_cid[1:]
+    if len(text_cid) < 2 or text_cid[0] != 'b' or body != body.lower():
+        raise ValueError(f'Not a base32 CID: {text_cid}')
+    return base64.b32decode(body.upper() + '=' * (-len(body) % 8))
+
+
+def file_tsize(size, chunk_size=CHUNK_SIZE, max_links=FILE_MAX_LINKS):
+    """The bytes of the DAG a file of size bytes makes, from size alone.
+
+    A leaf's size is its chunk's and a node's is its block's plus its
+    children's, and a binary CID is 36 bytes whatever it hashes, so no
+    content is needed."""
+    leaves, start = [], 0
+    while True:
+        n = min(size, start + chunk_size) - start
+        leaves.append((b'\0' * 36, n, n))
+        start += chunk_size
+        if start >= size:
+            return balance(leaves, max_links)[1]
+
+
+def cid_inventory(entries, chunk_size=CHUNK_SIZE, max_links=FILE_MAX_LINKS):
+    """The CID of every file and directory over entries, {path: (cid, size)}.
+
+    Directories are derived from the paths as cid_tree finds them on disk,
+    so an empty directory has no place here, and a hidden component is
+    refused since IPFS would leave it out. {path: cid}, files as given,
+    the root as '.'. Raises ShardingUnsupported as cid_directory does."""
+    tree = {}
+    for path, (given, size) in entries.items():
+        parts = path.split('/')
+        if any(not p or p.startswith('.') for p in parts):
+            raise ValueError(f'Not a path IPFS would add: {path}')
+        node = tree
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+            if not isinstance(node, dict):
+                raise ValueError(f'A file and a directory share a path: {path}')
+        if parts[-1] in node:
+            raise ValueError(f'A file and a directory share a path: {path}')
+        node[parts[-1]] = (decode(given), file_tsize(size, chunk_size, max_links), given)
+    cids = {}
+
+    def walk(node, rel):
+        links = []
+        for name in sorted(node, key=lambda n: n.encode('utf-8')):
+            child = node[name]
+            path = f'{rel}/{name}' if rel else name
+            if isinstance(child, dict):
+                c, t = walk(child, path)
+            else:
+                c, t, given = child
+                cids[path] = given
+            links.append((c, name.encode('utf-8'), t))
+        data = varint_field(1, 1)
+        size = len(pb_block(links, data))
+        if size > SHARDING_THRESHOLD:
+            raise ShardingUnsupported(f'{rel or "."}: directory block of {size} bytes')
+        c, t = pb_node(links, data)
+        cids[rel or '.'] = text(c)
+        return c, t
+
+    walk(tree, '')
+    return cids
