@@ -114,7 +114,7 @@ def plan(source, destination, ledger_id=None):
         raise Refused('destination', f'Unsafe destination: {rel}')
     if any(part.startswith('.') for part in rel.split('/')):
         raise Refused('hidden', f'Hidden files are not sealed: {rel}')
-    known, head, events, files, _, sealed_collections, items = ai.history(archive)
+    known, head, events, files, _, sealed_collections, items, _ = ai.history(archive)
     within = next((i for i in [*items, *sealed_collections] if rel == i or rel.startswith(i + '/')), None)
     if within:
         raise Refused('sealed', f'Destination is within sealed {within}: {rel}')
@@ -182,22 +182,91 @@ def rewrite(data, rewrites):
     return data
 
 
+def empty_directories(top, rel):
+    """The directories at or under top that hold nothing IPFS would add, as
+    paths from rel for top. Hidden entries count for nothing and hidden
+    directories are not entered, as IPFS leaves both out."""
+    if not top.is_dir() or top.is_symlink():
+        return []
+    names = sorted(n for n in os.listdir(top) if not n.startswith('.'))
+    if not names:
+        return [rel] if rel else []
+    return [p for name in names
+            for p in empty_directories(top / name, f'{rel}/{name}' if rel else name)]
+
+
 def write_event(plan, destination, add, collections):
-    """Write the schema 2 event sealing add at destination; its hash."""
+    """Write the event sealing add at destination; its hash or, in schema 3, its CID.
+
+    A ledger with no event yet, or one whose head is a block, takes a schema 3
+    event: a DAG-JSON block named by its CID, its root the fold of what the
+    ledger enrols. A schema 1 or 2 ledger takes a schema 2 event until it is
+    converted."""
     archive, ledger = Path(plan['archive']), Path(plan['ledger'])
-    head, events = ai.history(archive)[1:3]
-    data = encoded(dict(schema=2, previous=head, ledger_id=plan['ledger_id'],
-                        item=os.path.relpath(destination, archive), add=add,
-                        root=cid.cid_directory(archive), collections=collections))
-    ai.new_file(ledger / f'{events + 1:08}-{sha(data)}.json', data)
-    return sha(data)
+    entries, head, events, _, _, _, _, empties = ai.history(archive)
+    item = os.path.relpath(destination, archive)
+    if head is None or ai.is_event_cid(head):
+        empty = empty_directories(destination, item)
+        root = ai.fold({**entries, **add}, [*empties, *empty])['.']
+        data = ai.block(dict(schema=3, previous=ai.link(head) if head else None,
+                             ledger_id=plan['ledger_id'], item=item, add=add, root=root,
+                             collections=collections, empty=empty))
+        name = ai.event_cid(data)
+    else:
+        data = encoded(dict(schema=2, previous=head, ledger_id=plan['ledger_id'],
+                            item=item, add=add,
+                            root=cid.cid_directory(archive), collections=collections))
+        name = sha(data)
+    ai.new_file(ledger / f'{events + 1:08}-{name}.json', data)
+    return name
+
+
+def convert(root):
+    """Bring each schema 2 ledger under root to schema 3, by one event.
+
+    The event links the head as a block, names the hash it had, and enrols
+    the empty directories the archive holds, so that the fold of the ledger
+    is the archive's CID. Refused unless every archive is as its ledger says,
+    before any event is written.
+    {converted: [{archive, event, head}], skipped: [{archive, reason}]}."""
+    converted, skipped, pending = [], [], []
+    for archive in ai.roots(root):
+        entries, head, events, files, recorded, _, _, _ = ai.history(archive)
+        reason = ('no ledger' if head is None else 'schema 3' if ai.is_event_cid(head)
+                  else 'legacy entries' if any('cid' not in e for e in entries.values()) else None)
+        if reason:
+            skipped.append(dict(archive=str(archive), reason=reason))
+            continue
+        try:
+            cids = cid.cid_tree(archive)
+        except cid.ShardingUnsupported as unsupported:
+            raise Refused('sharding-unsupported', str(unsupported))
+        actual = {n: dict(e, cid=cids.get(n)) for n, e in ai.inventory(archive).items()}
+        diff = ai.differences(entries, actual)
+        if diff['missing'] or diff['changed'] or diff['new'] or recorded != cids['.']:
+            raise Refused('unclean', f'The archive is not as its ledger says; check it first: {archive}')
+        empty = empty_directories(archive, '')
+        folded = ai.fold(entries, empty)['.']
+        if folded != recorded:
+            raise Refused('root', f'The ledger does not account for the archive\'s CID: {archive}')
+        data = ai.block({'schema': 3, 'kind': 'conversion', 'from': head,
+                         'previous': ai.link(ai.event_cid(ai.as_block(files[-1].read_bytes()))),
+                         'ledger_id': last_id(files), 'empty': empty, 'root': folded})
+        name = ai.event_cid(data)
+        path = Path(files[-1]).parent / f'{events + 1:08}-{name}.json'
+        pending.append((archive, path, data, name))
+    for archive, path, data, name in pending:
+        ai.new_file(path, data)
+        checkpoint(archive, name)
+        converted.append(dict(archive=str(archive), event=str(path), head=name))
+    return dict(converted=converted, skipped=skipped)
 
 
 def sealed_so_far(plan):
     """The items plan's events have sealed so far; a stranger's is refused."""
     archive = Path(plan['archive'])
     files = ai.history(archive)[3]
-    hashes = [sha(f.read_bytes()) for f in files]
+    hashes = [f.name[9:-5] for f in files]
     if plan['previous'] is None:
         since = files
     elif plan['previous'] in hashes:
@@ -265,8 +334,8 @@ def apply(plan, expected):
         write_event(plan, destination, plan['add'], plan['collections'])
     for path in [*plan['add'], *(r['destination'] for r in plan['rumours'])]:
         protect(archive / path)
-    files = ai.history(archive)[3]
-    checkpoint(archive, sha(files[-1].read_bytes()))
+    head, _, files = ai.history(archive)[1:4]
+    checkpoint(archive, head)
     return files[-1], json.loads(files[-1].read_bytes())['root']
 
 
@@ -288,6 +357,8 @@ def main(args):
                 digest = sha(encoded(planned))
                 event, root = apply(planned, digest)
                 sys.stdout.buffer.write(encoded(dict(plan=planned, hash=digest, event=str(event), root=root)))
+        elif len(args) == 2 and args[0] == 'convert':
+            sys.stdout.buffer.write(encoded(convert(args[1])))
         elif len(args) == 3 and args[0] == 'apply':
             event, root = apply(json.loads(Path(args[1]).read_bytes()), args[2])
             sys.stdout.buffer.write(encoded(dict(event=str(event), root=root)))

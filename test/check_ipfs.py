@@ -27,6 +27,7 @@ import sys
 import tempfile
 
 from fixtures import build, fixtures, writable
+from pyposlib import archive_integrity as ai
 from pyposlib import cid
 
 
@@ -34,6 +35,44 @@ def kubo(program, repo, *args):
     result = subprocess.run([program, *args], env=dict(os.environ, IPFS_PATH=str(repo)),
                             capture_output=True, text=True, check=True)
     return result.stdout.strip()
+
+
+def block_agrees(program, repo, label, data, recorded):
+    """Whether kubo stores data as a dag-json block unchanged, under the CID recorded."""
+    with tempfile.NamedTemporaryFile() as file:
+        file.write(data)
+        file.flush()
+        theirs = kubo(program, repo, 'dag', 'put', '--input-codec', 'dag-json',
+                      '--store-codec', 'dag-json', file.name)
+    stored = subprocess.run([program, 'block', 'get', theirs], env=dict(os.environ, IPFS_PATH=str(repo)),
+                            capture_output=True, check=True).stdout
+    ours = ai.event_cid(data)
+    agrees = theirs == recorded == ours and stored == data
+    print(f'ok    {label}' if agrees else f'FAIL  {label}: recorded {recorded}, kubo {theirs}, ours {ours}')
+    return agrees
+
+
+def blocks(program, repo):
+    """The DAG-JSON fixtures, and every schema 3 event in the ledger fixtures,
+    against kubo; the number that disagree."""
+    failed = 0
+    for name, fixture in fixtures('dag-json'):
+        if 'error' not in fixture:
+            failed += not block_agrees(program, repo, f'dag-json {name}',
+                                       fixture['encoded'].encode(), fixture['cid'])
+    for name, fixture in fixtures('ledger'):
+        if 'error' in fixture:
+            continue
+        events = [(entry['path'].rsplit('/', 1)[-1], entry['text'])
+                  for entry in fixture['tree'] if '/ledger/' in entry['path'] and 'text' in entry]
+        events += [(event['name'], event['encoded'])
+                   for event in [*([fixture['event']] if 'event' in fixture else []),
+                                 *fixture.get('converted', [])]]
+        for file, text in events:
+            if ai.is_event_cid(file[9:-5]):
+                failed += not block_agrees(program, repo, f'ledger {name} {file[:8]}',
+                                           text.encode(), file[9:-5])
+    return failed
 
 
 def main(program):
@@ -89,6 +128,7 @@ def main(program):
             finally:
                 writable(root)
                 shutil.rmtree(root)
+        failed += blocks(program, repo)
     return 1 if failed else 0
 
 

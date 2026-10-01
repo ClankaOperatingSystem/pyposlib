@@ -73,12 +73,16 @@ class Formats(unittest.TestCase):
                               max_links=params.get('links', cid.FILE_MAX_LINKS))
                 path = root / fixture['entry']
                 self.assertEqual(fixture['cids'], cid.cid_tree(path, **limits))
-                entries = {}
+                entries, empty = {}, []
                 for file in path.rglob('*'):
                     rel = file.relative_to(path)
-                    if file.is_file() and not any(part.startswith('.') for part in rel.parts):
+                    if any(part.startswith('.') for part in rel.parts):
+                        continue
+                    if file.is_file():
                         entries[rel.as_posix()] = (cid.cid_file(file, **limits), file.stat().st_size)
-                self.assertEqual(fixture['cids'], cid.cid_inventory(entries, **limits))
+                    elif not any(not n.name.startswith('.') for n in file.iterdir()):
+                        empty.append(rel.as_posix())
+                self.assertEqual(fixture['cids'], cid.cid_inventory(entries, empty, **limits))
 
     def test_a_cid_decodes_to_the_bytes_it_encodes(self):
         binary = cid.leaf(b'hello')[0]
@@ -103,6 +107,23 @@ class Formats(unittest.TestCase):
                 cid.cid_inventory({path: (given, 1)})
         with self.assertRaises(ValueError):
             cid.cid_inventory({'a': (given, 1), 'a/b': (given, 1)})
+        for empty in (['a'], ['a/b'], ['.c'], ['d//e']):
+            with self.assertRaises(ValueError):
+                cid.cid_inventory({'a/b': (given, 1)}, empty)
+
+    def test_a_block_is_dag_json_written_one_way(self):
+        """Every fixture in fixtures/dag-json/: a value's block and its CID, or
+        bytes that are not the one block of their value, refused."""
+        for name, fixture in fixtures('dag-json'):
+            with self.subTest(name):
+                if 'error' in fixture:
+                    self.assertEqual(fixture['error'],
+                                     refusal(lambda: ai.strict(fixture['bytes'].encode(), name)))
+                    continue
+                data = fixture['encoded'].encode()
+                self.assertEqual(data, ai.block(fixture['value']))
+                self.assertEqual(fixture['cid'], ai.event_cid(data))
+                self.assertEqual(fixture['value'], ai.strict(data, name))
 
     def test_json_is_written_one_way(self):
         for name, fixture in fixtures('json'):
@@ -111,7 +132,7 @@ class Formats(unittest.TestCase):
 
     def test_ledgers(self):
         for name, fixture in fixtures('ledger'):
-            if fixture['kind'] == 'seal':
+            if fixture['kind'] in ('seal', 'convert'):
                 continue  # test_seal.py
             with self.subTest(name), Built(fixture) as root:
                 getattr(self, 'ledger_' + fixture['kind'])(fixture, root)
@@ -132,7 +153,8 @@ class Formats(unittest.TestCase):
         if 'error' in fixture:
             self.assertEqual(fixture['error'], refusal(lambda: ai.history(archive)))
             return
-        entries, head, events, _, root, collections, items = ai.history(archive)
+        entries, head, events, _, root, collections, items, empty = ai.history(archive)
+        self.assertEqual(fixture.get('empty', []), empty)
         self.assertEqual((fixture['head'], fixture['events']), (head, events))
         self.assertEqual((fixture['root'], fixture['collections']), (root, collections))
         self.assertEqual(fixture['items'], items)

@@ -61,6 +61,65 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def plain(value):
+    """Refuse value unless it is what a ledger writes as DAG-JSON: objects
+    with string keys, arrays, strings, integers of 64 bits and null."""
+    if value is None or isinstance(value, str):
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, list, dict)):
+        raise Refused('encoding', f'No DAG-JSON here for {value!r}')
+    if isinstance(value, int):
+        if not -2 ** 63 <= value < 2 ** 63:
+            raise Refused('encoding', f'Integer out of range: {value}')
+    elif isinstance(value, list):
+        for item in value:
+            plain(item)
+    else:
+        if '/' in value and not (len(value) == 1 and is_cid(value['/'])):
+            raise Refused('encoding', 'The key / belongs to a link, an object of that one key and a CID')
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise Refused('encoding', f'Key is not a string: {key!r}')
+            plain(item)
+
+
+def block(value):
+    """value as a DAG-JSON block: encoded(value) less its final newline."""
+    plain(value)
+    return encoded(value)[:-1]
+
+
+def strict(data, path):
+    """The value of data, refused unless data is the one DAG-JSON block of it."""
+    try:
+        value = json.loads(data)
+        exact = block(value) == data
+    except (ValueError, RecursionError):
+        exact = False
+    if not exact:
+        raise Refused('encoding', f'Not a DAG-JSON block: {path}')
+    return value
+
+
+def event_cid(data):
+    """The CID a schema 3 event of bytes data is named by."""
+    return cid.cid_block(cid.DAG_JSON, data)
+
+
+def is_event_cid(value):
+    return isinstance(value, str) and re.fullmatch('baguqeera[a-z2-7]{52}', value) is not None
+
+
+def link(cid_text):
+    """A DAG-JSON link to cid_text."""
+    return {'/': cid_text}
+
+
+def as_block(data):
+    """The bytes of an event written as canonical JSON, as a block: less its newline."""
+    return data[:-1] if data.endswith(b'\n') else data
+
+
 def safe(relative):
     p = PurePosixPath(relative)
     if (not relative or p.is_absolute() or str(p) != relative
@@ -152,10 +211,23 @@ def is_cid(value):
     return isinstance(value, str) and re.fullmatch('b[a-z2-7]+', value) is not None
 
 
+def listed_paths(value):
+    """Whether value is a sorted list of distinct safe paths."""
+    if (not isinstance(value, list) or not all(isinstance(p, str) for p in value)
+            or value != sorted(set(value))):
+        return False
+    try:
+        for p in value:
+            safe(p)
+    except Refused:
+        return False
+    return True
+
+
 def valid_entry(entry, schema):
-    fields = {'sha256', 'size', 'mode', 'cid'} if schema == 2 else {'sha256', 'size', 'mode'}
+    fields = {'sha256', 'size', 'mode', 'cid'} if schema >= 2 else {'sha256', 'size', 'mode'}
     return (isinstance(entry, dict) and set(entry) == fields
-            and (schema != 2 or is_cid(entry['cid']))
+            and (schema < 2 or is_cid(entry['cid']))
             and isinstance(entry['sha256'], str) and re.fullmatch('[0-9a-f]{64}', entry['sha256']) is not None
             and isinstance(entry['size'], int) and entry['size'] >= 0
             and isinstance(entry['mode'], int) and not entry['mode'] & 0o222)
@@ -205,37 +277,50 @@ def convert_entries(entries, event, path):
     return result
 
 
+EVENT_NAME = re.compile(r'(\d{8})-([0-9a-f]{64}|baguqeera[a-z2-7]{52})\.json')
+ORDINARY = {'schema', 'previous', 'add', 'ledger_id', 'root', 'collections', 'item'}
+
+
 def history(archive):
-    """entries, head, events, files, recorded root, collections, items."""
+    """entries, head, events, files, recorded root, collections, items, empty."""
     folder = ledger_folder(archive)
     if not folder.exists() and not folder.is_symlink():
-        return {}, None, 0, [], None, [], []
+        return {}, None, 0, [], None, [], [], []
     if folder.is_symlink() or not folder.is_dir():
         raise Refused('ledger', f'Invalid ledger: {folder}')
-    entries, previous, files, ledger_id = {}, None, [], None
-    schema, root, collections, items, converted = None, None, set(), [], False
+    entries, previous, previous_cid, files, ledger_id = {}, None, None, [], None
+    schema, root, collections, items, converted, empty = None, None, set(), [], False, set()
     for number, path in enumerate(sorted(folder.iterdir()), 1):
         regular(path)
         data = path.read_bytes()
-        match = re.fullmatch(r'(\d{8})-([0-9a-f]{64})\.json', path.name)
-        if not match or int(match[1]) != number or sha(data) != match[2]:
+        match = EVENT_NAME.fullmatch(path.name)
+        blocked = bool(match) and is_event_cid(match[2])
+        if not match or int(match[1]) != number or match[2] != (event_cid(data) if blocked else sha(data)):
             raise Refused('sequence', f'Ledger sequence/hash failure: {path}')
-        event = json.loads(data)
+        event = strict(data, path) if blocked else json.loads(data)
         keys = set(event) if isinstance(event, dict) else set()
-        conversion = (event.get('schema') == 2 and event.get('kind') == 'conversion'
+        version = event.get('schema') if isinstance(event, dict) else None
+        legacy = any('cid' not in e for e in entries.values())
+        conversion = (version == 2 and event.get('kind') == 'conversion'
                       and keys == {'schema', 'kind', 'previous', 'ledger_id', 'remove', 'rename',
                                    'convert', 'add', 'collections', 'root'}
-                      and not converted and any('cid' not in e for e in entries.values()))
-        if not ((event.get('schema') == 1 and schema != 2
+                      and not converted and legacy)
+        to_blocks = (version == 3 and event.get('kind') == 'conversion'
+                     and keys == {'schema', 'kind', 'previous', 'from', 'ledger_id', 'empty', 'root'}
+                     and schema == 2 and not legacy and event['from'] == previous)
+        follows = link(previous_cid) if version == 3 and previous_cid else previous
+        if not ((version == 1 and schema not in (2, 3)
                  and keys in ({'schema', 'previous', 'add'}, {'schema', 'previous', 'add', 'ledger_id'}))
-                or (event.get('schema') == 2
-                    and keys == {'schema', 'previous', 'add', 'ledger_id', 'root', 'collections', 'item'})
-                or conversion) \
-                or event['previous'] != previous:
+                or (version == 2 and schema != 3 and keys == ORDINARY)
+                or conversion
+                or (version == 3 and schema in (None, 3) and keys == ORDINARY | {'empty'})
+                or to_blocks) \
+                or (version == 3) != blocked \
+                or event['previous'] != follows:
             raise Refused('chain', f'Ledger chain failure: {path}')
-        schema = event['schema']
+        schema = version
         root = event.get('root')
-        if schema == 2 and not conversion:
+        if schema >= 2 and not conversion and not to_blocks:
             listed, item = event['collections'], event['item']
 
             def within(p):
@@ -251,6 +336,8 @@ def history(archive):
                     safe(name)
                 except Refused:
                     raise Refused('entry', f'Invalid root, item or collections: {path}')
+            if schema == 3 and not (listed_paths(event['empty']) and all(within(p) for p in event['empty'])):
+                raise Refused('entry', f'Invalid empty directories: {path}')
             collections.update(listed)
             items.append(item)
         # The first deployed hook wrote a v1 prefix before ledger UUIDs existed.
@@ -275,7 +362,14 @@ def history(archive):
                 except Refused:
                     raise Refused('entry', f'Invalid root or collections: {path}')
             collections.update(listed)
-            previous = sha(data)
+            previous, previous_cid = match[2], event_cid(as_block(data))
+            files.append(path)
+            continue
+        if to_blocks:
+            if not is_cid(root) or not listed_paths(event['empty']):
+                raise Refused('entry', f'Invalid root or empty directories: {path}')
+            empty.update(event['empty'])
+            previous = previous_cid = match[2]
             files.append(path)
             continue
         if not isinstance(event['add'], dict):
@@ -284,19 +378,22 @@ def history(archive):
             safe(name)
             if name.split('/')[0] == META or name in entries:
                 raise Refused('entry', 'Ledger cannot replace an earlier entry or index itself')
-            fields = {'sha256', 'size', 'mode', 'cid'} if schema == 2 else {'sha256', 'size', 'mode'}
+            fields = {'sha256', 'size', 'mode', 'cid'} if schema >= 2 else {'sha256', 'size', 'mode'}
             if (not isinstance(entry, dict) or set(entry) != fields
-                    or (schema == 2 and not is_cid(entry['cid']))
+                    or (schema >= 2 and not is_cid(entry['cid']))
                     or not re.fullmatch('[0-9a-f]{64}', entry['sha256'])
                     or not isinstance(entry['size'], int) or entry['size'] < 0
                     or not isinstance(entry['mode'], int) or entry['mode'] & 0o222):
                 raise Refused('entry', 'Invalid ledger entry')
             entries[name] = entry
-        previous = sha(data)
+        if schema == 3:
+            empty.update(event['empty'])
+        previous = match[2]
+        previous_cid = match[2] if blocked else event_cid(as_block(data))
         files.append(path)
     if not files:
         raise Refused('empty', f'Empty ledger needs investigation: {folder}')
-    return entries, previous, len(files), files, root, sorted(collections), sorted(items)
+    return entries, previous, len(files), files, root, sorted(collections), sorted(items), sorted(empty)
 
 
 def differences(known, actual):
@@ -344,7 +441,8 @@ def check_anchors(root, archives):
         if (set(value) != {'schema', 'heads', 'coverage'} or value['schema'] != 1
                 or value['coverage'] not in ('archive', 'tree')
                 or not isinstance(value['heads'], list)
-                or any(not isinstance(h, str) or not re.fullmatch('[0-9a-f]{64}', h) for h in value['heads'])):
+                or any(not isinstance(h, str) or not (re.fullmatch('[0-9a-f]{64}', h) or is_event_cid(h))
+                       for h in value['heads'])):
             raise Refused('checkpoint', 'Invalid checkpoint')
         if Path(root).name != 'archives' or value['coverage'] == 'archive':
             required.update(value['heads'])
@@ -357,7 +455,8 @@ def check_anchors(root, archives):
             if path in own or path.parent.name == META or (
                     path.parent.name == 'ledger' and path.parent.parent.name == INTEGRITY):
                 regular(path)
-                present.add(sha(path.read_bytes()))
+                data = path.read_bytes()
+                present.update((sha(data), event_cid(data)))
     if required - present:
         raise Refused('anchor', 'Missing anchored ledger (archive removed or history truncated): ' +
                          ', '.join(sorted(required - present)))
@@ -381,13 +480,21 @@ def checkpoint_heads(root):
 def fold_cids(archive):
     """The CIDs of archive from its ledger alone, as cid.cid_tree gives them
     from disk: every enrolled file's as recorded, every directory's derived,
-    the root as '.'. Refuses 'entry' when an enrolled entry records no CID,
-    as a legacy ledger's do."""
-    entries = history(archive)[0]
+    the empty ones as recorded, the root as '.'. Refuses 'entry' when an
+    enrolled entry records no CID, as a legacy ledger's do."""
+    found = history(archive)
+    return fold(found[0], found[7])
+
+
+def fold(entries, empty=()):
+    """The CIDs the enrolled entries and the empty directories give, as
+    fold_cids. A hidden entry is left out, as IPFS leaves it out."""
     for path, entry in entries.items():
         if 'cid' not in entry:
             raise Refused('entry', f'No CID enrolled for {path}')
-    return cid.cid_inventory({path: (entry['cid'], entry['size']) for path, entry in entries.items()})
+    return cid.cid_inventory({path: (entry['cid'], entry['size']) for path, entry in entries.items()
+                              if not any(part.startswith('.') for part in path.split('/'))},
+                             empty=empty)
 
 
 def report(root):
@@ -396,7 +503,7 @@ def report(root):
     check_anchors(root, archives)
     writable_checkpoints = [str(p) for p in checkpoint_files(root, archives) if regular(p).st_mode & 0o222]
     for archive in archives:
-        known, head, count, metadata, recorded, collections, _ = history(archive)
+        known, head, count, metadata, recorded, collections, _, _ = history(archive)
         actual = inventory(archive)
         try:
             cids = cid.cid_tree(archive)
@@ -632,6 +739,8 @@ USAGE = """Usage: COMMAND ...  (help prints this; Emacs itself takes --help)
       record the ledger heads under ROOT, once the check is clean
   repair ROOT
       remove write bits from verified evidence; never enrols
+  convert ROOT
+      bring each schema 2 ledger under ROOT to schema 3, once it is clean
 
 --apply applies a program's own plan at once and prints both.
 Exit 0 done or clean, 1 findings, 2 refused.
@@ -651,7 +760,7 @@ def checkpoint_root(root):
 def main(args=None):
     """The command line poslib's pos-seal-batch has, command for command."""
     args = sys.argv[1:] if args is None else args
-    if args[:1] in (['seal'], ['write-new'], ['apply']):
+    if args[:1] in (['seal'], ['write-new'], ['apply'], ['convert']):
         from . import seal
         return seal.main(args)
     try:
