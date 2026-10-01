@@ -12,6 +12,10 @@ The package is =pyposlib/=:
   checkpoints of ledger heads; and the command line, poslib's.
 - =cid.py= :: IPFS CIDs of files and trees, computed locally.
 - =seal.py= :: sealing items into archives: a plan, reviewed, then applied.
+- =remote.py= :: an archive kept away from its ledger, as poslib's
+  =doc/remote-archive-protocol.txt= specifies: the client's port and its
+  HTTP wire, and the keeping side, which verifies what it is sent and is
+  what a server wraps around its storage.
 
 Beside it, =archive_integrity.py= at the top runs the command line from
 a checkout, and =test/= holds the unittest tests.

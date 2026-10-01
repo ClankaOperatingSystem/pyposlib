@@ -288,12 +288,25 @@ def history(archive):
         return {}, None, 0, [], None, [], [], []
     if folder.is_symlink() or not folder.is_dir():
         raise Refused('ledger', f'Invalid ledger: {folder}')
-    entries, previous, previous_cid, files, ledger_id = {}, None, None, [], None
-    schema, root, collections, items, converted, empty = None, None, set(), [], False, set()
-    for number, path in enumerate(sorted(folder.iterdir()), 1):
+    files = sorted(folder.iterdir())
+    if not files:
+        raise Refused('empty', f'Empty ledger needs investigation: {folder}')
+
+    def read(path):
         regular(path)
-        data = path.read_bytes()
-        match = EVENT_NAME.fullmatch(path.name)
+        return path, path.read_bytes()
+    entries, head, root, collections, items, empty = chain(read(path) for path in files)
+    return entries, head, len(files), files, root, collections, items, empty
+
+
+def chain(events):
+    """entries, head, recorded root, collections, items and empty of events,
+    each (path, bytes) in order: a ledger's event files, wherever they are
+    kept. path is a path or a name; its name is what the event goes by."""
+    entries, previous, previous_cid, ledger_id = {}, None, None, None
+    schema, root, collections, items, converted, empty = None, None, set(), [], False, set()
+    for number, (path, data) in enumerate(events, 1):
+        match = EVENT_NAME.fullmatch(getattr(path, 'name', path))
         blocked = bool(match) and is_event_cid(match[2])
         if not match or int(match[1]) != number or match[2] != (event_cid(data) if blocked else sha(data)):
             raise Refused('sequence', f'Ledger sequence/hash failure: {path}')
@@ -363,14 +376,12 @@ def history(archive):
                     raise Refused('entry', f'Invalid root or collections: {path}')
             collections.update(listed)
             previous, previous_cid = match[2], event_cid(as_block(data))
-            files.append(path)
             continue
         if to_blocks:
             if not is_cid(root) or not listed_paths(event['empty']):
                 raise Refused('entry', f'Invalid root or empty directories: {path}')
             empty.update(event['empty'])
             previous = previous_cid = match[2]
-            files.append(path)
             continue
         if not isinstance(event['add'], dict):
             raise Refused('entry', 'Invalid ledger additions')
@@ -390,10 +401,7 @@ def history(archive):
             empty.update(event['empty'])
         previous = match[2]
         previous_cid = match[2] if blocked else event_cid(as_block(data))
-        files.append(path)
-    if not files:
-        raise Refused('empty', f'Empty ledger needs investigation: {folder}')
-    return entries, previous, len(files), files, root, sorted(collections), sorted(items), sorted(empty)
+    return entries, previous, root, sorted(collections), sorted(items), sorted(empty)
 
 
 def differences(known, actual):
@@ -486,15 +494,16 @@ def fold_cids(archive):
     return fold(found[0], found[7])
 
 
-def fold(entries, empty=()):
+def fold(entries, empty=(), blocks=None):
     """The CIDs the enrolled entries and the empty directories give, as
-    fold_cids. A hidden entry is left out, as IPFS leaves it out."""
+    fold_cids. A hidden entry is left out, as IPFS leaves it out. Each
+    directory's block is put in blocks, by its CID, when blocks is given."""
     for path, entry in entries.items():
         if 'cid' not in entry:
             raise Refused('entry', f'No CID enrolled for {path}')
     return cid.cid_inventory({path: (entry['cid'], entry['size']) for path, entry in entries.items()
                               if not any(part.startswith('.') for part in path.split('/'))},
-                             empty=empty)
+                             empty=empty, blocks=blocks)
 
 
 def report(root):

@@ -166,6 +166,75 @@ def cid_block(codec, block):
     return text(binary_cid(codec, block))
 
 
+def blocks(data, chunk_size=CHUNK_SIZE, max_links=FILE_MAX_LINKS):
+    """The blocks of data as a file, {cid: block}: its leaves, and the nodes
+    over them when it is more than one chunk. The file's CID is among them."""
+    held, nodes, start = {}, [], 0
+    while True:
+        chunk = data[start:start + chunk_size]
+        node = leaf(chunk)
+        held[text(node[0])] = chunk
+        nodes.append(node)
+        start += chunk_size
+        if start >= len(data):
+            break
+    while len(nodes) > 1:
+        level = []
+        for i in range(0, len(nodes), max_links):
+            children = nodes[i:i + max_links]
+            sizes = [c[2] for c in children]
+            links = [(c[0], b'', c[1]) for c in children]
+            content = (varint_field(1, 2) + varint_field(3, sum(sizes))
+                       + b''.join(varint_field(4, s) for s in sizes))
+            node = pb_node(links, content)
+            held[text(node[0])] = pb_block(links, content)
+            level.append((*node, sum(sizes)))
+        nodes = level
+    return held
+
+
+def read_varint(block, at):
+    value, shift = 0, 0
+    while True:
+        byte = block[at]
+        at += 1
+        value |= (byte & 0x7f) << shift
+        if byte < 0x80:
+            return value, at
+        shift += 7
+
+
+def codec(text_cid):
+    """The multicodec of text_cid: RAW, DAG_PB or DAG_JSON."""
+    return read_varint(decode(text_cid), 1)[0]
+
+
+def parse(block):
+    """A dag-pb block as (links, data): each link (cid, name, tsize), as pb_block takes them."""
+    links, data, at = [], b'', 0
+    while at < len(block):
+        tag, at = read_varint(block, at)
+        length, at = read_varint(block, at)
+        field, at = block[at:at + length], at + length
+        if tag >> 3 == 1:
+            data = field
+        else:
+            child, name, tsize, inner = b'', b'', 0, 0
+            while inner < len(field):
+                key, inner = read_varint(field, inner)
+                if key & 7 == 2:
+                    size, inner = read_varint(field, inner)
+                    value, inner = field[inner:inner + size], inner + size
+                    if key >> 3 == 1:
+                        child = value
+                    else:
+                        name = value
+                else:
+                    tsize, inner = read_varint(field, inner)
+            links.append((child, name, tsize))
+    return links, data
+
+
 def decode(text_cid):
     """The binary CID of text_cid, a CID in lower-case multibase base32."""
     body = text_cid[1:]
@@ -189,7 +258,7 @@ def file_tsize(size, chunk_size=CHUNK_SIZE, max_links=FILE_MAX_LINKS):
             return balance(leaves, max_links)[1]
 
 
-def cid_inventory(entries, empty=(), chunk_size=CHUNK_SIZE, max_links=FILE_MAX_LINKS):
+def cid_inventory(entries, empty=(), chunk_size=CHUNK_SIZE, max_links=FILE_MAX_LINKS, blocks=None):
     """The CID of every file and directory over entries, {path: (cid, size)},
     and the empty directories empty.
 
@@ -197,7 +266,8 @@ def cid_inventory(entries, empty=(), chunk_size=CHUNK_SIZE, max_links=FILE_MAX_L
     one that holds nothing has no file to derive it from and is listed in
     empty. A hidden component is refused since IPFS would leave it out.
     {path: cid}, files as given, the root as '.'. Raises ShardingUnsupported
-    as cid_directory does."""
+    as cid_directory does. Each directory's block is put in blocks, by its
+    CID, when blocks is given."""
     tree = {}
     for path, (given, size) in entries.items():
         parts = path.split('/')
@@ -242,6 +312,8 @@ def cid_inventory(entries, empty=(), chunk_size=CHUNK_SIZE, max_links=FILE_MAX_L
             raise ShardingUnsupported(f'{rel or "."}: directory block of {size} bytes')
         c, t = pb_node(links, data)
         cids[rel or '.'] = text(c)
+        if blocks is not None:
+            blocks[text(c)] = pb_block(links, data)
         return c, t
 
     walk(tree, '')
