@@ -43,6 +43,7 @@ INTEGRITY = 'archive-integrity'  # beside an archive: ledger/ and checkpoints/
 META = '.archive-integrity'  # legacy: the ledger inside an archive
 ANCHORS = '.archive-integrity-anchors'  # legacy: checkpoints beside a root
 DECLARATION = b'#+COLLECTION: t'
+CONFIGURATION = '.pos/config.yaml'  # a repository's, at its root: how each scope's archive is kept
 
 
 class Refused(ValueError):
@@ -155,15 +156,60 @@ def record(path):
     return dict(sha256=sha(data), size=len(data), mode=stat.S_IMODE(after.st_mode) & ~0o222)
 
 
+def kept(archive):
+    """The base URL of archive's keeper, or None if it is kept on disk.
+
+    The archive's scope is the directory holding it, and its repository the
+    nearest directory at or above the scope that holds .git. The repository's
+    .pos/config.yaml says how each scope's archive is kept; a scope it does
+    not name, in a repository without one or in none, keeps its archive on
+    disk. Refuses 'config' for a configuration that is refused."""
+    scope = Path(os.path.abspath(archive)).parent
+    root = next((part for part in [scope, *scope.parents] if (part / '.git').exists()), None)
+    if root is None or not (root / CONFIGURATION).exists():
+        return None
+    from . import tree  # needs PyYAML, which only a configured repository asks for
+    try:
+        config = tree.read_config((root / CONFIGURATION).read_bytes().decode('utf-8', 'replace'))
+    except Refused as refused:
+        raise Refused('config', f'Configuration refused ({refused.kind}): {root / CONFIGURATION}')
+    path = scope.relative_to(root).as_posix()
+    entry = next((a for a in config['archives'] if a['scope'] == path), None)
+    return entry['url'] if entry and entry['kept'] == 'remote' else None
+
+
+def kept_here(directory):
+    """The archive of the scope directory, if a keeper keeps it and none is
+    here: the scope has a ledger beside where its archive would be, and no
+    archives."""
+    archive = directory / 'archives'
+    if (not archive.exists() and not archive.is_symlink()
+            and (directory / INTEGRITY / 'ledger').is_dir() and kept(archive)):
+        return archive
+    return None
+
+
+def kept_entries(archive, known):
+    """What the ledger of the kept archive enrols, as what it holds. Refuses
+    'kept' if the archive has files on disk: it is not with its keeper yet."""
+    if archive.exists() and inventory(archive):
+        raise Refused('kept', f'Kept by a keeper, and has files on disk: {archive}')
+    return known
+
+
 def roots(root):
-    """Discover outermost archive trees; ignore disposable/hidden active trees."""
+    """Discover outermost archive trees; ignore disposable/hidden active trees.
+    An archive a keeper keeps is found by its ledger, with no directory of its
+    own."""
     root = checked(root).resolve()
-    if not root.is_dir():
+    if not root.is_dir() and not (root.name == 'archives' and kept_here(root.parent)):
         raise Refused('root', 'Root must be an existing directory')
     if root.name == 'archives':
         return [root]
     found = []
     for here, dirs, files in os.walk(root, followlinks=False):
+        if kept_here(Path(here)):
+            found.append(Path(here) / 'archives')
         dirs[:] = sorted(d for d in dirs if not d.startswith(('.', '_')))
         for name in list(dirs):
             p = Path(here) / name
@@ -465,6 +511,13 @@ def check_anchors(root, archives):
                 regular(path)
                 data = path.read_bytes()
                 present.update((sha(data), event_cid(data)))
+        if kept(archive):
+            # The ledgers within are with the keeper: known by their events' enrolled names.
+            for name in history(archive)[0]:
+                parts = name.split('/')
+                named = EVENT_NAME.fullmatch(parts[-1])
+                if named and (parts[-2:-1] == [META] or parts[-3:-1] == [INTEGRITY, 'ledger']):
+                    present.add(named[2])
     if required - present:
         raise Refused('anchor', 'Missing anchored ledger (archive removed or history truncated): ' +
                          ', '.join(sorted(required - present)))
@@ -512,23 +565,31 @@ def report(root):
     check_anchors(root, archives)
     writable_checkpoints = [str(p) for p in checkpoint_files(root, archives) if regular(p).st_mode & 0o222]
     for archive in archives:
-        known, head, count, metadata, recorded, collections, _, _ = history(archive)
-        actual = inventory(archive)
-        try:
-            cids = cid.cid_tree(archive)
-        except cid.ShardingUnsupported:
-            cids = None
-        compared = {n: dict(e, cid=cids.get(n)) if cids is not None and 'cid' in known.get(n, {}) else e
-                    for n, e in actual.items()}
-        diff = differences(known, compared)
-        writable = [os.path.relpath(p, archive) for p in [*(archive / n for n in actual), *metadata]
+        known, head, count, metadata, recorded, collections, _, empty = history(archive)
+        keeper = kept(archive)
+        if keeper:
+            # Nothing of it is on disk to read: it is reported from its ledger.
+            actual = kept_entries(archive, known)
+            cids = fold(known, empty) if known else {}
+            diff = dict(missing=[], changed=[], new=[])
+        else:
+            actual = inventory(archive)
+            try:
+                cids = cid.cid_tree(archive)
+            except cid.ShardingUnsupported:
+                cids = None
+            compared = {n: dict(e, cid=cids.get(n)) if cids is not None and 'cid' in known.get(n, {}) else e
+                        for n, e in actual.items()}
+            diff = differences(known, compared)
+        writable = [os.path.relpath(p, archive)
+                    for p in [*(archive / n for n in ([] if keeper else actual)), *metadata]
                     if regular(p).st_mode & 0o222]
         hidden = [n for n in actual if any(part.startswith('.') for part in n.split('/'))
                   and not any(part in (META, ANCHORS) for part in n.split('/'))]
-        undeclared = [c for c in collections if not declared(archive / c)]
-        reports.append(dict(archive=str(archive), head=head, events=count, files=len(actual),
+        undeclared = [] if keeper else [c for c in collections if not declared(archive / c)]
+        reports.append(dict(archive=str(archive), kept=keeper, head=head, events=count, files=len(actual),
                             writable=sorted(writable), checkpoint_writable=writable_checkpoints if not reports else [],
-                            root=cids['.'] if cids is not None else None, recorded_root=recorded,
+                            root=cids.get('.') if cids is not None else None, recorded_root=recorded,
                             hidden=sorted(hidden), undeclared=undeclared, **diff))
     return reports
 
@@ -675,7 +736,8 @@ def repair(root):
     for item in checks:
         archive = Path(item['archive'])
         known, _, _, metadata = history(archive)[:4]
-        for path in [*(archive / name for name in known), *metadata]:
+        # A keeper holds a kept archive's files; only its ledger is here.
+        for path in [*(archive / name for name in ([] if item['kept'] else known)), *metadata]:
             mode = stat.S_IMODE(regular(path).st_mode)
             if mode & 0o222:
                 path.chmod(mode & ~0o222)
