@@ -12,9 +12,9 @@ POSLIB     ?= poslib
 
 export POSLIB
 
-.PHONY: check check-ipfs test formats sealing differential poslib
+.PHONY: check check-ipfs test formats sealing remote differential poslib
 
-check: test formats sealing differential
+check: test formats sealing remote differential
 
 test:
 	$(PYTHON) -B test/test_archive_integrity.py
@@ -24,6 +24,9 @@ formats: poslib
 
 sealing: poslib
 	$(PYTHON) -B test/test_seal.py
+
+remote: poslib
+	$(PYTHON) -B test/test_remote.py
 
 differential: poslib
 	$(PYTHON) -B test/test_differential.py
