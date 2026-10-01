@@ -58,8 +58,8 @@ def fetch(url, form=None):
     except urllib.error.HTTPError as error:
         with error:
             return error.code, error.read()
-    except urllib.error.URLError as error:
-        raise Refused('remote', f'{url}: {error.reason}')
+    except OSError as error:
+        raise Refused('remote', f'{url}: {getattr(error, "reason", None) or error}')
 
 
 def tokens_file():
