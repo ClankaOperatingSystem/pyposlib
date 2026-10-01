@@ -17,6 +17,7 @@
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -24,6 +25,7 @@ from fixtures import fixtures, write, writable
 from test_formats import Built
 from pyposlib import archive_integrity as ai
 from pyposlib import cid
+from pyposlib import remote
 from pyposlib import seal
 
 
@@ -48,10 +50,35 @@ def absolute_plan(plan, root):
             for k, v in plan.items()}
 
 
+class Tape:
+    """A keeper that is a fixture's recording: each request must be the next
+    one recorded, and is answered as it was."""
+
+    def __init__(self, recorded):
+        self.url, self.token = recorded['url'], recorded['token']
+        self.left = list(recorded['exchanges'])
+
+    def send(self, method, url, headers, body):
+        if not self.left:
+            raise AssertionError(f'A request the recording does not have: {method} {url}')
+        exchange = self.left.pop(0)
+        sent = dict(method=method, path=url[len(self.url):], authorization=headers.get('Authorization'))
+        if body is not None:
+            sent.update(content_type=headers['Content-Type'], body_sha256=ai.sha(body))
+        if sent != exchange['request']:
+            raise AssertionError(f"Not the request recorded: {sent} for {exchange['request']}")
+        return exchange['response']['status'], exchange['response']['body'].encode()
+
+    def client(self):
+        return remote.HttpRemoteArchive(self.url, self.token, self.send)
+
+
 def run(fixture, root):
     """Seal fixture, built in root; what happened, relative to root.
     An item holding Org or Markdown is poslib's to plan: its plan comes from
-    the fixture, and only the application is ours."""
+    the fixture, and only the application is ours. A fixture with a keeper is
+    sealed to its recording, with the claims it gives."""
+    tape = Tape(fixture['keeper']) if 'keeper' in fixture else None
     try:
         try:
             plan = seal.plan(root / fixture['source'], root / fixture['destination'],
@@ -60,12 +87,20 @@ def run(fixture, root):
             if refused.kind != 'interpretation' or 'plan' not in fixture:
                 raise
             plan = absolute_plan(fixture['plan'], root)
-        event, _ = seal.apply(plan, ai.sha(ai.encoded(plan)))
+        if tape:
+            event, _ = seal.apply(plan, ai.sha(ai.encoded(plan)), keeper=tape.client(),
+                                  claims=fixture['claims'])
+            if tape.left or (root / fixture['source']).exists():
+                raise AssertionError('The recording was not played out, or the item was left')
+        else:
+            event, _ = seal.apply(plan, ai.sha(ai.encoded(plan)))
         scope = Path(plan['archive']).parent
         return dict(plan=relative_plan(plan, root),
                     event=dict(name=event.name, encoded=event.read_bytes().decode()),
                     report=relative_report(ai.report(scope), root))
     except ai.Refused as refused:
+        if tape and tape.left:
+            raise AssertionError('Refused before the recording was played out')
         return dict(error=refused.kind)
 
 
@@ -203,6 +238,142 @@ class Sealing(unittest.TestCase):
             self.assertEqual(0, subprocess.run(command + ['--apply'], input=b'handover\n',
                                                capture_output=True).returncode)
             self.assertEqual(target.read_bytes(), b'handover\n')
+
+
+LEDGER = '0f1e2d3c-4b5a-4968-8778-a6b5c4d3e2f1'
+KEEPER = 'https://keeper.example/ledgers/' + LEDGER
+
+
+class KeptScope:
+    """A temporary repository whose scope projects/a a keeper keeps, holding
+    an item, trial/, and a keeper in memory to send it to."""
+
+    def __enter__(self):
+        self.dir = Path(tempfile.mkdtemp(prefix='pyposlib-kept-')).resolve()
+        (self.dir / '.git').mkdir()
+        write(self.dir / '.pos/config.yaml',
+              f'pos: 1\narchives:\n  - scope: projects/a\n    kept: remote\n    url: {KEEPER}\n'.encode())
+        self.scope = self.dir / 'projects/a'
+        write(self.scope / 'trial/result.txt', b'result')
+        self.keeper = remote.Keeper()
+        return self
+
+    def __exit__(self, *_):
+        writable(self.dir)
+        shutil.rmtree(self.dir)
+
+    def client(self, keeper=None):
+        keeper = keeper or self.keeper
+
+        def send(method, url, headers, body):
+            status, _, answer = remote.handle(keeper, method, url[len(KEEPER):], headers, body)
+            return status, answer
+        return remote.HttpRemoteArchive(KEEPER, None, send)
+
+    def seal(self, item, keeper=None):
+        plan = seal.plan(self.scope / item, self.scope / 'archives' / item, LEDGER)
+        return seal.apply(plan, ai.sha(ai.encoded(plan)), keeper=self.client(keeper), claims={})
+
+
+class SealingToAKeeper(unittest.TestCase):
+    def test_what_is_sealed_is_read_back_from_its_keeper(self):
+        """The keeper holds the bytes under the CIDs the ledger enrols, and
+        nothing of the item is left on disk."""
+        with KeptScope() as kept:
+            event, root = kept.seal('trial')
+            cids = ai.fold_cids(kept.scope / 'archives')
+            self.assertEqual(root, cids['.'])
+            self.assertEqual(b'result', kept.keeper.read(cids['trial'], 'result.txt'))
+            self.assertEqual(event.read_bytes(), kept.keeper.event(1))
+            self.assertFalse((kept.scope / 'trial').exists())
+            self.assertFalse((kept.scope / 'archives').exists())
+
+    def test_a_keeper_ahead_with_another_ledger_leaves_this_one_as_it_was(self):
+        """Events fetched to catch up that do not continue the ledger are
+        removed again, and the item stays."""
+        with KeptScope() as kept, KeptScope() as other:
+            kept.seal('trial')
+            write(other.scope / 'trial/result.txt', b'another result')
+            write(other.scope / 'more/m.txt', b'more')
+            other.seal('trial')
+            other.seal('more')
+            write(kept.scope / 'next/n.txt', b'next')
+            before = sorted(p.name for p in (kept.scope / 'archive-integrity/ledger').iterdir())
+            with self.assertRaises(ai.Refused) as refused:
+                kept.seal('next', keeper=other.keeper)
+            self.assertEqual('chain', refused.exception.kind)
+            self.assertEqual(before, sorted(p.name for p in (kept.scope / 'archive-integrity/ledger').iterdir()))
+            self.assertTrue((kept.scope / 'next/n.txt').exists())
+
+    def test_another_client_s_seal_is_fetched_and_the_plan_made_before_it_refused(self):
+        """Two clones seal to one keeper. The second finds the keeper an event
+        ahead: its ledger is brought up to date, and its plan, reviewed
+        against the ledger as it was, is refused for a new one."""
+        with KeptScope() as kept, KeptScope() as clone:
+            write(clone.scope / 'more/m.txt', b'more')
+            plan = seal.plan(clone.scope / 'more', clone.scope / 'archives/more', LEDGER)
+            event, _ = kept.seal('trial')
+            with self.assertRaises(ai.Refused) as refused:
+                seal.apply(plan, ai.sha(ai.encoded(plan)), keeper=clone.client(kept.keeper), claims={})
+            self.assertEqual('plan', refused.exception.kind)
+            self.assertEqual([event.name], [p.name for p in ai.history(clone.scope / 'archives')[3]])
+            self.assertTrue((clone.scope / 'more/m.txt').exists())
+            clone.seal('more', keeper=kept.keeper)
+            self.assertEqual(2, kept.keeper.describe()['events'])
+
+    def test_an_item_changed_after_its_keeper_took_it_is_not_removed(self):
+        """Resumed after the keeper has the event, a seal removes the item
+        only if it is still what was sealed."""
+        with KeptScope() as kept:
+            plan = seal.plan(kept.scope / 'trial', kept.scope / 'archives/trial', LEDGER)
+            digest = ai.sha(ai.encoded(plan))
+            file, _, data = seal.event_of(plan, 'trial', plan['add'], plan['collections'], [])
+            kept.keeper.append(file, data, {plan['add']['trial/result.txt']['cid']: b'result'}, {})
+            write(kept.scope / 'trial/result.txt', b'changed')
+            with self.assertRaises(ai.Refused) as refused:
+                seal.apply(plan, digest, keeper=kept.client(), claims={})
+            self.assertEqual('plan', refused.exception.kind)
+            self.assertTrue((kept.scope / 'trial/result.txt').exists())
+
+    def test_a_plan_is_applied_only_where_it_was_planned_for(self):
+        """A plan says whether its archive is with a keeper, and which: one
+        made before the scope's configuration changed is refused."""
+        with KeptScope() as kept:
+            plan = seal.plan(kept.scope / 'trial', kept.scope / 'archives/trial', LEDGER)
+            self.assertEqual(KEEPER, plan['kept'])
+            (kept.dir / '.pos/config.yaml').write_text('pos: 1\n')
+            with self.assertRaises(ai.Refused) as refused:
+                seal.apply(plan, ai.sha(ai.encoded(plan)), keeper=kept.client(), claims={})
+            self.assertEqual('plan', refused.exception.kind)
+            self.assertTrue((kept.scope / 'trial/result.txt').exists())
+
+    def test_the_claims_say_where_a_seal_came_from(self):
+        """The plan, the tool, and of a repository git can read: the scope,
+        the commit and branch, whether the tree is dirty, and each remote
+        without the user and password its URL may hold."""
+        with KeptScope() as kept:
+            shutil.rmtree(kept.dir / '.git')
+            git = lambda *args: subprocess.run(
+                ['git', '-C', str(kept.dir), '-c', 'user.name=A', '-c', 'user.email=a@example.org', *args],
+                check=True, capture_output=True, text=True).stdout.strip()
+            git('init', '-q', '-b', 'trunk')
+            git('remote', 'add', 'origin', 'https://someone:secret@forge.example/some/one.git')
+            git('remote', 'add', 'mirror', 'git@forge.example:some/one.git')
+            git('add', '.pos')
+            git('commit', '-q', '-m', 'Configure')
+            plan = seal.plan(kept.scope / 'trial', kept.scope / 'archives/trial', LEDGER)
+            self.assertEqual(
+                {'plan': 'the hash', 'tool': 'pyposlib', 'scope': 'projects/a',
+                 'commit': git('rev-parse', 'HEAD'), 'branch': 'trunk', 'dirty': 'true',
+                 'remote.origin': 'https://forge.example/some/one.git',
+                 'remote.mirror': 'git@forge.example:some/one.git'},
+                seal.claims_of(plan, 'the hash'))
+
+    def test_claims_outside_a_repository_git_reads_say_what_is_known(self):
+        with KeptScope() as kept:
+            plan = seal.plan(kept.scope / 'trial', kept.scope / 'archives/trial', LEDGER)
+            self.assertEqual({'plan': 'the hash', 'tool': 'pyposlib', 'scope': 'projects/a'},
+                             seal.claims_of(plan, 'the hash'))
 
 
 if __name__ == '__main__':
