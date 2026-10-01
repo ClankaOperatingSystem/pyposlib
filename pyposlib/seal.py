@@ -29,6 +29,9 @@ Exit 0 done, 2 refused.
 import json
 import os
 from pathlib import Path
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -36,6 +39,7 @@ import uuid
 from . import archive_integrity as ai
 from .archive_integrity import Refused, encoded, sha
 from . import cid
+from . import remote
 
 
 def outermost_archive(path):
@@ -118,18 +122,23 @@ def plan(source, destination, ledger_id=None):
     within = next((i for i in [*items, *sealed_collections] if rel == i or rel.startswith(i + '/')), None)
     if within:
         raise Refused('sealed', f'Destination is within sealed {within}: {rel}')
-    if ai.kept(archive):
-        raise Refused('kept', f'Sealing into an archive a keeper keeps is not written: {archive}')
-    actual = ai.inventory(archive)
-    try:
-        cids = cid.cid_tree(archive) if archive.exists() else {}
-    except cid.ShardingUnsupported:
-        cids = None
-    compared = {n: dict(e, cid=cids.get(n)) if cids is not None and 'cid' in known.get(n, {}) else e
-                for n, e in actual.items()}
-    diff = ai.differences(known, compared)
-    if diff['missing'] or diff['changed']:
-        raise Refused('differs', f"Existing evidence differs in {archive}: {diff['missing']} {diff['changed']}")
+    keeper = ai.kept(archive)
+    if keeper:
+        # Nothing of it is on disk to compare: what it holds is what its ledger enrols.
+        if head is not None and not ai.is_event_cid(head):
+            raise Refused('kept', f'A keeper keeps a ledger of schema 3; convert this one first: {archive}')
+        actual = ai.kept_entries(archive, known)
+    else:
+        actual = ai.inventory(archive)
+        try:
+            cids = cid.cid_tree(archive) if archive.exists() else {}
+        except cid.ShardingUnsupported:
+            cids = None
+        compared = {n: dict(e, cid=cids.get(n)) if cids is not None and 'cid' in known.get(n, {}) else e
+                    for n, e in actual.items()}
+        diff = ai.differences(known, compared)
+        if diff['missing'] or diff['changed']:
+            raise Refused('differs', f"Existing evidence differs in {archive}: {diff['missing']} {diff['changed']}")
     held = item_files(source, rel)
     if any(p.endswith(('.org', '.md')) for p in held):
         raise Refused('interpretation', f'Links in Org and Markdown are poslib\'s to resolve: {source}')
@@ -137,7 +146,8 @@ def plan(source, destination, ledger_id=None):
                 archive=str(archive), ledger=str(ledger_folder(archive)), number=events + 1,
                 previous=head, ledger_id=last_id(files) or ledger_id or str(uuid.uuid4()),
                 add=entries_of(held), collections=sorted(collections(source, rel)),
-                links=[], originals={}, rumours=[], inventory_sha256=sha(encoded(actual)))
+                links=[], originals={}, rumours=[], inventory_sha256=sha(encoded(actual)),
+                **(dict(kept=keeper) if keeper else {}))
 
 
 def stage(data, destination, ledger_id=None):
@@ -197,18 +207,17 @@ def empty_directories(top, rel):
             for p in empty_directories(top / name, f'{rel}/{name}' if rel else name)]
 
 
-def write_event(plan, destination, add, collections):
-    """Write the event sealing add at destination; its hash or, in schema 3, its CID.
+def event_of(plan, item, add, collections, empty):
+    """The event sealing add as item, with its empty directories: its ledger
+    file's name, what names it, and its bytes.
 
     A ledger with no event yet, or one whose head is a block, takes a schema 3
     event: a DAG-JSON block named by its CID, its root the fold of what the
     ledger enrols. A schema 1 or 2 ledger takes a schema 2 event until it is
     converted."""
-    archive, ledger = Path(plan['archive']), Path(plan['ledger'])
+    archive = Path(plan['archive'])
     entries, head, events, _, _, _, _, empties = ai.history(archive)
-    item = os.path.relpath(destination, archive)
     if head is None or ai.is_event_cid(head):
-        empty = empty_directories(destination, item)
         root = ai.fold({**entries, **add}, [*empties, *empty])['.']
         data = ai.block(dict(schema=3, previous=ai.link(head) if head else None,
                              ledger_id=plan['ledger_id'], item=item, add=add, root=root,
@@ -219,7 +228,14 @@ def write_event(plan, destination, add, collections):
                             item=item, add=add,
                             root=cid.cid_directory(archive), collections=collections))
         name = sha(data)
-    ai.new_file(ledger / f'{events + 1:08}-{name}.json', data)
+    return f'{events + 1:08}-{name}.json', name, data
+
+
+def write_event(plan, destination, add, collections):
+    """Write the event sealing add at destination; its hash or, in schema 3, its CID."""
+    item = os.path.relpath(destination, plan['archive'])
+    file, name, data = event_of(plan, item, add, collections, empty_directories(destination, item))
+    ai.new_file(Path(plan['ledger']) / file, data)
     return name
 
 
@@ -299,13 +315,140 @@ def rewrite_source(plan):
             raise Refused('plan', f'Item changed since review: {file}')
 
 
-def apply(plan, expected):
+def claims_of(plan, expected):
+    """What this client says of where a seal came from, for its keeper to
+    record: the plan's hash, the tool, and of the scope's repository, where
+    there is one and git reads it, the scope's path, the commit and branch it
+    is at, whether its working tree is dirty, and each remote's URL less any
+    user and password. Strings by name."""
+    claims = dict(plan=expected, tool='pyposlib')
+    scope = Path(plan['archive']).parent
+    root = next((part for part in [scope, *scope.parents] if (part / '.git').exists()), None)
+    if root is None:
+        return claims
+    claims['scope'] = scope.relative_to(root).as_posix()
+
+    def git(*args):
+        try:
+            # The ceiling keeps git to this repository: one it cannot read is not
+            # answered for by whatever repository lies above it.
+            done = subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True, timeout=60,
+                                  env=dict(os.environ, GIT_CEILING_DIRECTORIES=str(root.parent)))
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout.rstrip('\n') if done.returncode == 0 else None
+
+    commit, branch = git('rev-parse', '--verify', '-q', 'HEAD'), git('symbolic-ref', '--short', '-q', 'HEAD')
+    status = git('status', '--porcelain')
+    if commit:
+        claims['commit'] = commit
+    if branch:
+        claims['branch'] = branch
+    if status is not None:
+        claims['dirty'] = 'true' if status else 'false'
+    for line in (git('config', '--get-regexp', r'^remote\..*\.url$') or '').splitlines():
+        key, _, url = line.partition(' ')
+        claims[key[:-len('.url')]] = re.sub(r'^([a-z][a-z0-9+.-]*://)[^/@]*@', r'\1', url)
+    return claims
+
+
+def catch_up(archive, ledger, keeper):
+    """Bring the ledger to what its keeper holds, writing the events it lacks.
+
+    A seal interrupted between the keeper's answer and the ledger's file
+    leaves the keeper one event ahead. Refuses 'chain', with the ledger as it
+    was, unless the keeper's events continue this ledger's and end at the
+    keeper's head."""
+    described = keeper.describe()
+    head, events = ai.history(archive)[1:3]
+    written = []
+    try:
+        for number in range(events + 1, described['events'] + 1):
+            data = keeper.event(number)
+            path = ledger / f'{number:08}-{ai.event_cid(data)}.json'
+            ai.new_file(path, data)
+            written.append(path)
+        try:
+            caught = ai.history(archive)[1:3]
+        except Refused:
+            caught = None
+        if caught != (described['head'], described['events']):
+            raise Refused('chain', f'The keeper holds another ledger than this one: {archive}')
+    except Refused:
+        for path in written:
+            path.unlink()
+        if events == 0 and ledger.is_dir() and not any(ledger.iterdir()):
+            ledger.rmdir()
+        raise
+
+
+def apply_kept(plan, expected, keeper, claims):
+    """Apply plan to an archive a keeper keeps: each event is sent with its
+    files, written to the ledger once the keeper has it, and the item is
+    then removed from where it lay. Interrupted, it resumes."""
+    source, destination = Path(plan['source']), Path(plan['destination'])
+    archive, ledger = Path(plan['archive']), Path(plan['ledger'])
+    rel = os.path.relpath(destination, archive)
+    if ai.kept(archive) != plan['kept']:
+        raise Refused('plan', f'The archive is not kept as planned: {archive}')
+    if keeper is None:
+        keeper = remote.HttpRemoteArchive(plan['kept'], os.environ.get('POS_ARCHIVE_TOKEN'))
+    if claims is None:
+        claims = claims_of(plan, expected)
+    catch_up(archive, ledger, keeper)
+    sealed = sealed_so_far(plan)
+    if not sealed and sha(encoded(ai.kept_entries(archive, ai.history(archive)[0]))) != plan['inventory_sha256']:
+        raise Refused('plan', f'Archive changed since review: {archive}')
+
+    def send(item, add, collections, empty, files):
+        file, _, data = event_of(plan, item, add, collections, empty)
+        keeper.append(file, data, files, claims)
+        ai.new_file(ledger / file, data)
+
+    for rumour in plan['rumours']:
+        if rumour['destination'] in sealed:
+            continue
+        data = rumour['text'].encode()
+        added = dict(cid=cid.cid_bytes(data), mode=0o444, sha256=sha(data), size=len(data))
+        send(rumour['destination'], {rumour['destination']: added}, [], [], {added['cid']: data})
+    if rel not in sealed:
+        if not source.exists():
+            raise Refused('plan', f'The item is not where it was planned: {source}')
+        rewrite_source(plan)
+        held = item_files(source, rel)
+        if encoded(plan['add']) != encoded(entries_of(held)):
+            raise Refused('plan', f'Item changed since review: {source}')
+        send(rel, plan['add'], plan['collections'], empty_directories(source, rel),
+             {plan['add'][path]['cid']: file.read_bytes() for path, file in held.items()})
+    # The keeper has the item and the ledger says so: the copy here goes.
+    if source.exists() or source.is_symlink():
+        if encoded(plan['add']) != encoded(entries_of(item_files(source, rel))):
+            raise Refused('plan', f'Item changed since it was sealed: {source}')
+        if source.is_dir():
+            shutil.rmtree(source)
+        else:
+            source.unlink()
+    head, _, files = ai.history(archive)[1:4]
+    checkpoint(archive, head)
+    return files[-1], json.loads(files[-1].read_bytes())['root']
+
+
+def apply(plan, expected, keeper=None, claims=None):
     """Apply plan, whose canonical JSON has the SHA-256 expected: its rumours, then
-    its item, links rewritten; return (event, root)."""
+    its item, links rewritten; return (event, root).
+
+    A plan for an archive a keeper keeps is sent to it: keeper is the
+    remote.RemoteArchive to send to, by default the plan's over HTTP with the
+    token in POS_ARCHIVE_TOKEN, and claims what to say of the seal, by default
+    claims_of."""
     if sha(encoded(plan)) != expected:
         raise Refused('plan', 'Reviewed plan hash mismatch')
     if plan.get('schema') != 2 or plan.get('operation') != 'seal':
         raise Refused('plan', 'Not a seal plan')
+    if plan.get('kept'):
+        return apply_kept(plan, expected, keeper, claims)
+    if ai.kept(plan['archive']):
+        raise Refused('plan', f"The archive is not kept as planned: {plan['archive']}")
     source, destination = Path(plan['source']), Path(plan['destination'])
     archive = Path(plan['archive'])
     rel = os.path.relpath(destination, archive)
