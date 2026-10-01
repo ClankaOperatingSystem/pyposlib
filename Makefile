@@ -1,4 +1,5 @@
 # make check: the tests, then the shared fixtures and poslib, differentially.
+# It needs PyYAML, for the .pos reader: PYTHON names an interpreter that has it.
 # make check-ipfs IPFS=path/to/ipfs: the CID fixtures against kubo, offline.
 #
 # The shared fixtures are poslib's: POSLIB names a checkout, else poslib/
@@ -12,9 +13,9 @@ POSLIB     ?= poslib
 
 export POSLIB
 
-.PHONY: check check-ipfs test formats sealing remote differential poslib
+.PHONY: check check-ipfs test formats sealing remote tree differential poslib
 
-check: test formats sealing remote differential
+check: test formats sealing remote tree differential
 
 test:
 	$(PYTHON) -B test/test_archive_integrity.py
@@ -27,6 +28,9 @@ sealing: poslib
 
 remote: poslib
 	$(PYTHON) -B test/test_remote.py
+
+tree: poslib
+	$(PYTHON) -B test/test_tree.py
 
 differential: poslib
 	$(PYTHON) -B test/test_differential.py

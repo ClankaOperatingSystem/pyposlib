@@ -5,11 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "pyposlib"
 version = "0.1.0"
-description = "Archive integrity ledgers, content identifiers and sealing for a personal OS in Org files, in lockstep with poslib"
+description = "Archive integrity ledgers, content identifiers, sealing and .pos configuration for a personal OS in Org files, in lockstep with poslib"
 readme = { file = "README.org", content-type = "text/plain" }
 license = "GPL-3.0-or-later"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["PyYAML>=6.0"]
 
 [project.urls]
 Repository = "https://github.com/monkeypants/pyposlib"
