@@ -17,6 +17,7 @@ Specification = "https://github.com/monkeypants/poslib"
 
 [project.scripts]
 pyposlib = "pyposlib.archive_integrity:main"
+pyposlib-tree = "pyposlib.tree:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["pyposlib"]
