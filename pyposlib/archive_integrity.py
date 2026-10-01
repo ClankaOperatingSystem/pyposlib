@@ -156,14 +156,15 @@ def record(path):
     return dict(sha256=sha(data), size=len(data), mode=stat.S_IMODE(after.st_mode) & ~0o222)
 
 
-def kept(archive):
-    """The base URL of archive's keeper, or None if it is kept on disk.
+def entry_of(archive):
+    """The entry for archive's scope in its repository's configuration, or None.
 
     The archive's scope is the directory holding it, and its repository the
-    nearest directory at or above the scope that holds .git. The repository's
-    .pos/config.yaml says how each scope's archive is kept; a scope it does
-    not name, in a repository without one or in none, keeps its archive on
-    disk. Refuses 'config' for a configuration that is refused."""
+    nearest directory at or above the scope that holds .git. The entry is the
+    one under archives in the repository's .pos/config.yaml whose scope is
+    the scope's path there; there is none for a scope it does not name, in a
+    repository without one or in none. Refuses 'config' for a configuration
+    that is refused."""
     scope = Path(os.path.abspath(archive)).parent
     root = next((part for part in [scope, *scope.parents] if (part / '.git').exists()), None)
     if root is None or not (root / CONFIGURATION).exists():
@@ -174,8 +175,40 @@ def kept(archive):
     except Refused as refused:
         raise Refused('config', f'Configuration refused ({refused.kind}): {root / CONFIGURATION}')
     path = scope.relative_to(root).as_posix()
-    entry = next((a for a in config['archives'] if a['scope'] == path), None)
+    return next((a for a in config['archives'] if a['scope'] == path), None)
+
+
+def kept(archive):
+    """The base URL of archive's keeper, or None if it is kept on disk. A
+    keeper has the archive of a scope whose entry in its repository's
+    .pos/config.yaml is kept remote; every other is on disk."""
+    entry = entry_of(archive)
     return entry['url'] if entry and entry['kept'] == 'remote' else None
+
+
+def named(archive):
+    """The id archive's ledger is to have, or None if no entry says: the
+    ledger key of the scope's entry. A keeper may be bound to a ledger's id
+    before the ledger has an event, so the entry says what the id is."""
+    return (entry_of(archive) or {}).get('ledger')
+
+
+def identity(files):
+    """The ledger_id of the last of the event files that has one, or None."""
+    for path in reversed(files):
+        found = json.loads(path.read_bytes()).get('ledger_id')
+        if found:
+            return found
+    return None
+
+
+def as_named(archive, files):
+    """Refuses 'identity' unless archive's ledger, of event files, is the one
+    its entry names. A ledger with no event yet, or an archive no entry names
+    a ledger for, is not refused."""
+    name = named(archive)
+    if name and files and identity(files) != name:
+        raise Refused('identity', f'Not the ledger its entry names, {name}: {archive}')
 
 
 def kept_here(directory):
@@ -566,6 +599,7 @@ def report(root):
     writable_checkpoints = [str(p) for p in checkpoint_files(root, archives) if regular(p).st_mode & 0o222]
     for archive in archives:
         known, head, count, metadata, recorded, collections, _, empty = history(archive)
+        as_named(archive, metadata)
         keeper = kept(archive)
         if keeper:
             # Nothing of it is on disk to read: it is reported from its ledger.

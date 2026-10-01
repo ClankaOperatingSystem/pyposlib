@@ -84,11 +84,7 @@ def ledger_folder(archive):
 
 
 def last_id(files):
-    for path in reversed(files):
-        found = json.loads(path.read_bytes()).get('ledger_id')
-        if found:
-            return found
-    return None
+    return ai.identity(files)
 
 
 def entries_of(files):
@@ -96,7 +92,9 @@ def entries_of(files):
 
 
 def plan(source, destination, ledger_id=None):
-    """The plan to seal source at destination, inside an archive."""
+    """The plan to seal source at destination, inside an archive. ledger_id
+    names a new ledger; by default it takes the id its scope's entry names,
+    else one made at random."""
     source = ai.checked(source).resolve()
     destination = Path(os.path.abspath(destination))
     ai.checked(destination.parent)
@@ -122,6 +120,10 @@ def plan(source, destination, ledger_id=None):
     within = next((i for i in [*items, *sealed_collections] if rel == i or rel.startswith(i + '/')), None)
     if within:
         raise Refused('sealed', f'Destination is within sealed {within}: {rel}')
+    named = ai.named(archive)
+    ai.as_named(archive, files)
+    if named and ledger_id and named != ledger_id:
+        raise Refused('identity', f'Not the ledger its entry names, {named}: {archive}')
     keeper = ai.kept(archive)
     if keeper:
         # Nothing of it is on disk to compare: what it holds is what its ledger enrols.
@@ -144,7 +146,7 @@ def plan(source, destination, ledger_id=None):
         raise Refused('interpretation', f'Links in Org and Markdown are poslib\'s to resolve: {source}')
     return dict(schema=2, operation='seal', source=str(source), destination=str(destination),
                 archive=str(archive), ledger=str(ledger_folder(archive)), number=events + 1,
-                previous=head, ledger_id=last_id(files) or ledger_id or str(uuid.uuid4()),
+                previous=head, ledger_id=last_id(files) or named or ledger_id or str(uuid.uuid4()),
                 add=entries_of(held), collections=sorted(collections(source, rel)),
                 links=[], originals={}, rumours=[], inventory_sha256=sha(encoded(actual)),
                 **(dict(kept=keeper) if keeper else {}))
