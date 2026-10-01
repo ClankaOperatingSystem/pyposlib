@@ -31,6 +31,7 @@ SHARDING_THRESHOLD = 262144
 
 RAW = 0x55
 DAG_PB = 0x70
+DAG_JSON = 0x0129
 
 
 class ShardingUnsupported(ValueError):
@@ -160,6 +161,11 @@ def cid_tree(path, chunk_size=CHUNK_SIZE, max_links=FILE_MAX_LINKS):
     return cids
 
 
+def cid_block(codec, block):
+    """The CID of block under codec: how a DAG-JSON ledger event is named."""
+    return text(binary_cid(codec, block))
+
+
 def decode(text_cid):
     """The binary CID of text_cid, a CID in lower-case multibase base32."""
     body = text_cid[1:]
@@ -183,13 +189,15 @@ def file_tsize(size, chunk_size=CHUNK_SIZE, max_links=FILE_MAX_LINKS):
             return balance(leaves, max_links)[1]
 
 
-def cid_inventory(entries, chunk_size=CHUNK_SIZE, max_links=FILE_MAX_LINKS):
-    """The CID of every file and directory over entries, {path: (cid, size)}.
+def cid_inventory(entries, empty=(), chunk_size=CHUNK_SIZE, max_links=FILE_MAX_LINKS):
+    """The CID of every file and directory over entries, {path: (cid, size)},
+    and the empty directories empty.
 
-    Directories are derived from the paths as cid_tree finds them on disk,
-    so an empty directory has no place here, and a hidden component is
-    refused since IPFS would leave it out. {path: cid}, files as given,
-    the root as '.'. Raises ShardingUnsupported as cid_directory does."""
+    Directories are derived from the paths as cid_tree finds them on disk;
+    one that holds nothing has no file to derive it from and is listed in
+    empty. A hidden component is refused since IPFS would leave it out.
+    {path: cid}, files as given, the root as '.'. Raises ShardingUnsupported
+    as cid_directory does."""
     tree = {}
     for path, (given, size) in entries.items():
         parts = path.split('/')
@@ -203,6 +211,18 @@ def cid_inventory(entries, chunk_size=CHUNK_SIZE, max_links=FILE_MAX_LINKS):
         if parts[-1] in node:
             raise ValueError(f'A file and a directory share a path: {path}')
         node[parts[-1]] = (decode(given), file_tsize(size, chunk_size, max_links), given)
+    for path in empty:
+        parts = path.split('/')
+        if any(not p or p.startswith('.') for p in parts):
+            raise ValueError(f'Not a path IPFS would add: {path}')
+        node = tree
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+            if not isinstance(node, dict):
+                raise ValueError(f'A file and a directory share a path: {path}')
+        if parts[-1] in node:
+            raise ValueError(f'Not an empty directory: {path}')
+        node[parts[-1]] = {}
     cids = {}
 
     def walk(node, rel):

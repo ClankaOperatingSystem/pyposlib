@@ -99,6 +99,29 @@ class Sealing(unittest.TestCase):
             self.assertEqual(cid.cid_tree(archive), ai.fold_cids(archive))
             self.assertEqual(root, ai.fold_cids(archive)['.'])
 
+    def test_every_shared_fixture_converts_the_same_bytes(self):
+        """The conversion events, what was skipped and the report after, or
+        the refusal, as fixtures/ledger/ of kind convert."""
+        for name, fixture in fixtures('ledger'):
+            if fixture['kind'] != 'convert':
+                continue
+            with self.subTest(name), Built(fixture) as root:
+                try:
+                    result = seal.convert(root / fixture['root'])
+                except ai.Refused as refused:
+                    self.assertEqual(fixture.get('error'), refused.kind)
+                    continue
+                self.assertNotIn('error', fixture)
+                base = root.resolve()
+                events = [dict(name=Path(c['event']).name, encoded=Path(c['event']).read_bytes().decode())
+                          for c in result['converted']]
+                skipped = [dict(archive=Path(s['archive']).relative_to(base).as_posix(), reason=s['reason'])
+                           for s in result['skipped']]
+                self.assertEqual(ai.encoded(fixture['converted']), ai.encoded(events))
+                self.assertEqual(ai.encoded(fixture['skipped']), ai.encoded(skipped))
+                self.assertEqual(ai.encoded(fixture['report']),
+                                 ai.encoded(relative_report(ai.report(root / fixture['root']), root)))
+
     def test_every_shared_fixture_seals_the_same_bytes(self):
         for name, fixture in fixtures('ledger'):
             if fixture['kind'] != 'seal':
