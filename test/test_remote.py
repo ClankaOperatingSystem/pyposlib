@@ -19,9 +19,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 
 from fixtures import HERE, POSLIB, fixtures, write, writable
@@ -246,6 +248,20 @@ class Protocol(unittest.TestCase):
                 served.shutdown()
                 served.server_close()
             self.assertEqual('remote', refusal(remote.HttpRemoteArchive(url, 'let-me-in').describe))
+
+    def test_a_keeper_that_says_nothing_is_given_up_on(self):
+        """A socket that takes a request and never answers it: the client
+        waits as long as it is told to and no longer."""
+        listening = socket.create_server(('127.0.0.1', 0))
+        patience, remote.SILENCE = remote.SILENCE, 0.3
+        try:
+            url = f'http://127.0.0.1:{listening.getsockname()[1]}'
+            began = time.monotonic()
+            self.assertEqual('remote', refusal(remote.HttpRemoteArchive(url, 'let-me-in').describe))
+            self.assertLess(time.monotonic() - began, 5)
+        finally:
+            remote.SILENCE = patience
+            listening.close()
 
 
 @unittest.skipUnless(shutil.which(EMACS), 'needs Emacs')

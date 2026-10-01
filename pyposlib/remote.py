@@ -39,6 +39,7 @@ from . import cid
 from . import signin
 
 VERSION = 1
+SILENCE = 60  # seconds a keeper may say nothing before a request is given up
 
 
 class RemoteArchive(Protocol):
@@ -280,16 +281,18 @@ def handle(keeper, method, path, headers, body):
 
 
 def send(method, url, headers, body):
-    """One HTTP exchange: (status, body). What HttpRemoteArchive sends with."""
+    """One HTTP exchange: (status, body). What HttpRemoteArchive sends with.
+    A keeper that says nothing for SILENCE seconds, or goes away part way,
+    is refused as 'remote'."""
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=SILENCE) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as error:
         with error:
             return error.code, error.read()
-    except urllib.error.URLError as error:
-        raise Refused('remote', f'{url}: {error.reason}')
+    except OSError as error:
+        raise Refused('remote', f'{url}: {getattr(error, "reason", None) or error}')
 
 
 class HttpRemoteArchive:
