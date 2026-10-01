@@ -319,11 +319,12 @@ def rewrite_source(plan):
 
 def claims_of(plan, expected):
     """What this client says of where a seal came from, for its keeper to
-    record: the plan's hash, the tool, and of the scope's repository, where
-    there is one and git reads it, the scope's path, the commit and branch it
+    record: the plan's hash, where there was a plan, the tool, and of the
+    scope's repository, where there is one and git reads it, the scope's
+    path, the commit and branch it
     is at, whether its working tree is dirty, and each remote's URL less any
     user and password. Strings by name."""
-    claims = dict(plan=expected, tool='pyposlib')
+    claims = dict(tool='pyposlib', **(dict(plan=expected) if expected else {}))
     scope = Path(plan['archive']).parent
     root = next((part for part in [scope, *scope.parents] if (part / '.git').exists()), None)
     if root is None:
@@ -486,6 +487,90 @@ def apply(plan, expected, keeper=None, claims=None):
     return files[-1], json.loads(files[-1].read_bytes())['root']
 
 
+def added_paths(files, entries):
+    """For each of a ledger's event files in order, the paths it enrolled as
+    the ledger now has them, in entries: an event before a schema 2
+    conversion enrolled paths that conversion may have renamed or removed."""
+    values = [json.loads(path.read_bytes()) for path in files]
+    conversion = next((i for i, v in enumerate(values)
+                       if v.get('schema') == 2 and v.get('kind') == 'conversion'), None)
+    rename = values[conversion]['rename'] if conversion is not None else {}
+    added = []
+    for i, value in enumerate(values):
+        paths = list(value.get('add', {}))
+        if conversion is not None and i < conversion:
+            paths = [rename.get(path, path) for path in paths]
+        added.append([path for path in paths if path in entries])
+    return added, next((i for i, v in enumerate(values) if v.get('schema') == 3), None)
+
+
+def keep(root, keeper_for=None, claims=None):
+    """Move to its keeper each archive under root that its scope's entry says a
+    keeper keeps and whose files are still on disk.
+
+    The keeper is sent the events it lacks, in order, each with the files it
+    enrolled; the first schema 3 event also with whatever enrolled before it
+    was not sent in this run, since that event is where a keeper requires
+    them. Once the keeper holds the ledger's head and its root, the archive
+    is removed from disk. Refused unless every such archive is as its ledger
+    says, with a ledger of schema 3 beside it and nothing hidden, before
+    anything is sent. Interrupted, it resumes.
+    {kept: [{archive, keeper, events, files}], skipped: [{archive, reason}]}:
+    events and files are those sent.
+    keeper_for makes a remote.RemoteArchive of a URL, by default ai.keeper_of;
+    claims is what to say of each event, by default claims_of."""
+    kept, skipped, pending = [], [], []
+    for archive in ai.roots(root):
+        url = ai.kept(archive)
+        entries, head, events, files, recorded, _, _, empty = ai.history(archive)
+        reason = ('on disk' if not url else 'no ledger' if head is None
+                  else 'kept' if not (archive.exists() and ai.inventory(archive)) else None)
+        if reason:
+            skipped.append(dict(archive=str(archive), reason=reason))
+            continue
+        ai.as_named(archive, files)
+        if not ai.is_event_cid(head):
+            raise Refused('kept', f'A keeper keeps a ledger of schema 3; convert this one first: {archive}')
+        if files[0].parent.parent.parent != archive.parent:
+            raise Refused('ledger', f'A kept archive\'s ledger lies beside it, not inside: {archive}')
+        try:
+            cids = cid.cid_tree(archive)
+        except cid.ShardingUnsupported as unsupported:
+            raise Refused('sharding-unsupported', str(unsupported))
+        actual = {n: dict(e, cid=cids.get(n)) for n, e in ai.inventory(archive).items()}
+        diff = ai.differences(entries, actual)
+        if (diff['missing'] or diff['changed'] or diff['new'] or recorded != cids['.']
+                or ai.fold(entries, empty)['.'] != recorded):
+            raise Refused('unclean', f'The archive is not as its ledger says; check it first: {archive}')
+        if any(part.startswith('.') for path in entries for part in path.split('/')):
+            raise Refused('hidden', f'A keeper holds no hidden file, and this ledger enrols one: {archive}')
+        pending.append((archive, url, entries, head, files, recorded))
+    for archive, url, entries, head, files, recorded in pending:
+        keeper = (keeper_for or ai.keeper_of)(url)
+        said = claims_of(dict(archive=str(archive)), None) if claims is None else claims
+        described = keeper.describe()
+        held = described['events']
+        if held > len(files) or (held and described['head'] != files[held - 1].name[9:-5]):
+            raise Refused('chain', f'The keeper holds another ledger than this one: {archive}')
+        added, first = added_paths(files, entries)
+        sent = {}
+        for i in range(held, len(files)):
+            paths = [path for j in range(i + 1) for path in added[j]] if i == first else added[i]
+            batch = {}
+            for path in paths:
+                given = entries[path]['cid']
+                if given not in sent and given not in batch:
+                    batch[given] = (archive / path).read_bytes()
+            keeper.append(files[i].name, files[i].read_bytes(), batch, said)
+            sent.update(batch)
+        described = keeper.describe()
+        if (described['head'], described['events'], described['root']) != (head, len(files), recorded):
+            raise Refused('chain', f'The keeper does not hold this ledger as it is: {archive}')
+        shutil.rmtree(archive)
+        kept.append(dict(archive=str(archive), keeper=url, events=len(files) - held, files=len(sent)))
+    return dict(kept=kept, skipped=skipped)
+
+
 def main(args):
     try:
         if args[:1] == ['seal'] and (len(args) == 3 or args[3:] == ['--apply'] and len(args) == 4):
@@ -506,6 +591,8 @@ def main(args):
                 sys.stdout.buffer.write(encoded(dict(plan=planned, hash=digest, event=str(event), root=root)))
         elif len(args) == 2 and args[0] == 'convert':
             sys.stdout.buffer.write(encoded(convert(args[1])))
+        elif len(args) == 2 and args[0] == 'keep':
+            sys.stdout.buffer.write(encoded(keep(args[1])))
         elif len(args) == 3 and args[0] == 'apply':
             event, root = apply(json.loads(Path(args[1]).read_bytes()), args[2])
             sys.stdout.buffer.write(encoded(dict(event=str(event), root=root)))

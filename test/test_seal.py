@@ -135,6 +135,33 @@ class Sealing(unittest.TestCase):
                 self.assertEqual(ai.encoded(fixture['report']),
                                  ai.encoded(relative_report(ai.report(root / fixture['root']), root)))
 
+    def test_every_shared_fixture_keeps_the_same_way(self):
+        """What was moved to a keeper, what was left with its reason and the
+        report after, or the refusal, as fixtures/ledger/ of kind keep: each
+        request as its keeper recorded it, and a kept archive gone from disk."""
+        for name, fixture in fixtures('ledger'):
+            if fixture['kind'] != 'keep':
+                continue
+            with self.subTest(name), Built(fixture) as root:
+                tape = Tape(fixture['keeper'])
+                try:
+                    got = seal.keep(root / fixture['root'], keeper_for=lambda url: tape.client(),
+                                    claims=fixture['claims'])
+                except ai.Refused as refused:
+                    self.assertEqual(fixture.get('error'), refused.kind)
+                    self.assertFalse(tape.left)
+                    continue
+                self.assertNotIn('error', fixture)
+                self.assertFalse(tape.left)
+                base = str(root.resolve())
+                for item in got['kept']:
+                    self.assertFalse(Path(item['archive']).exists())
+                for item in got['kept'] + got['skipped']:
+                    item['archive'] = os.path.relpath(item['archive'], base)
+                self.assertEqual((fixture['kept'], fixture['skipped']), (got['kept'], got['skipped']))
+                self.assertEqual(ai.encoded(fixture['report']),
+                                 ai.encoded(relative_report(ai.report(root / fixture['root']), root)))
+
     def test_every_shared_fixture_seals_the_same_bytes(self):
         for name, fixture in fixtures('ledger'):
             if fixture['kind'] != 'seal':
@@ -324,6 +351,31 @@ class SealingToAKeeper(unittest.TestCase):
                 seal.apply(plan, ai.sha(ai.encoded(plan)), keeper=kept.client(), claims={})
             self.assertEqual('plan', refused.exception.kind)
             self.assertTrue((kept.scope / 'trial/result.txt').exists())
+
+    def test_an_archive_moved_to_its_keeper_is_read_back_whole(self):
+        """Sealed on disk, then given to a keeper: every file the ledger
+        enrols is read from the keeper as it was on disk, the keeper's root
+        is the ledger's, and the check that follows is of a kept archive."""
+        with KeptScope() as kept:
+            (kept.dir / '.pos/config.yaml').write_text('pos: 1\n')
+            write(kept.scope / 'more/deep/m.txt', b'more')
+            for item in ('trial', 'more'):
+                plan = seal.plan(kept.scope / item, kept.scope / 'archives' / item, LEDGER)
+                seal.apply(plan, ai.sha(ai.encoded(plan)))
+            archive = kept.scope / 'archives'
+            before = {path: (archive / path).read_bytes() for path in ai.inventory(archive)}
+            write(kept.dir / '.pos/config.yaml',
+                  f'pos: 1\narchives:\n  - scope: projects/a\n    kept: remote\n    url: {KEEPER}\n'.encode())
+            got = seal.keep(kept.dir, keeper_for=lambda url: kept.client(), claims={})
+            self.assertEqual([(2, 2)], [(item['events'], item['files']) for item in got['kept']])
+            self.assertFalse(archive.exists())
+            cids = ai.fold_cids(archive)
+            self.assertEqual(before, {path: kept.keeper.read(cids[path]) for path in before})
+            (report,) = ai.report(kept.dir, ask=True, keeper_for=lambda url: kept.client())
+            self.assertEqual(report['root'], kept.keeper.describe()['root'])
+            self.assertFalse(ai.findings(report))
+            self.assertEqual([dict(archive=str(archive), reason='kept')],
+                             seal.keep(kept.dir, keeper_for=lambda url: kept.client(), claims={})['skipped'])
 
     def test_the_claims_say_where_a_seal_came_from(self):
         """The plan, the tool, and of a repository git can read: the scope,

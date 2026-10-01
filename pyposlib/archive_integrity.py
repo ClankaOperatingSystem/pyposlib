@@ -878,6 +878,8 @@ USAGE = """Usage: COMMAND ...  (help prints this; Emacs itself takes --help)
       remove write bits from verified evidence; never enrols
   convert ROOT
       bring each schema 2 ledger under ROOT to schema 3, once it is clean
+  keep ROOT
+      move to its keeper each archive under ROOT a keeper is to keep
 
 --apply applies a program's own plan at once and prints both.
 Exit 0 done or clean, 1 findings, 2 refused.
@@ -897,7 +899,7 @@ def checkpoint_root(root):
 def main(args=None):
     """The command line poslib's pos-seal-batch has, command for command."""
     args = sys.argv[1:] if args is None else args
-    if args[:1] in (['seal'], ['write-new'], ['apply'], ['convert']):
+    if args[:1] in (['seal'], ['write-new'], ['apply'], ['convert'], ['keep']):
         from . import seal
         return seal.main(args)
     try:
