@@ -47,6 +47,7 @@ _PAIR = r'(?:projects|responsibilities)/[^/]+'
 _SCOPE = rf'{_PAIR}(?:/{_PAIR})*'
 _WORKTREE = re.compile(rf'(?:({_SCOPE})/)?_worktrees/([^/]+)')
 _INTEGER = re.compile(r'0|[1-9][0-9]*')
+_UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 
 
 def _scope_path(path):
@@ -169,7 +170,7 @@ def _archives(entries, children):
     archives = []
     for entry in entries:
         archive = _mapping(entry, 'An archive', [('scope', 'string', True), ('kept', 'string', True),
-                                                 ('url', 'string', False)])
+                                                 ('ledger', 'string', False), ('url', 'string', False)])
         scope, kept = archive['scope'], archive['kept']
         if scope != '.':
             if not _scope_path(scope):
@@ -177,15 +178,24 @@ def _archives(entries, children):
             _own_scope(scope, children, 'An archive')
         if kept not in ('committed', 'uncommitted', 'remote'):
             raise Refused('bad-value', f'An archive is not kept {kept}')
+        if 'ledger' in archive and not _UUID.fullmatch(archive['ledger']):
+            raise Refused('bad-value', f"Not a ledger's id: {archive['ledger']}")
+        ledger = {'ledger': archive['ledger']} if 'ledger' in archive else {}
         if kept != 'remote':
             if 'url' in archive:
                 raise Refused('bad-value', f'Only a remote archive has a url: {scope}')
-            archives.append({'scope': scope, 'kept': kept})
+            archives.append({'scope': scope, 'kept': kept, **ledger})
         elif 'url' in archive:
-            archives.append({'scope': scope, 'kept': kept, 'url': archive['url']})
+            archives.append({'scope': scope, 'kept': kept, **ledger, 'url': archive['url']})
         else:
             raise Refused('missing-key', 'A remote archive lacks url')
     _distinct([archive['scope'] for archive in archives], "An archive's scope")
+    seen = set()
+    for archive in archives:
+        if archive.get('ledger') in seen:
+            raise Refused('bad-value', f"A ledger is named twice: {archive['ledger']}")
+        if 'ledger' in archive:
+            seen.add(archive['ledger'])
     return archives
 
 
