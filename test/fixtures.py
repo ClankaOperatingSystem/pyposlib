@@ -17,6 +17,7 @@
 import hashlib
 import json
 import os
+import tempfile
 from pathlib import Path
 import sys
 
@@ -24,6 +25,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 # A test asks no keeper but one a fixture has recorded; nor does poslib, run from here.
 os.environ['POS_ARCHIVE_OFFLINE'] = '1'
+# Nor does a test read or write the tokens a person has kept by signing in.
+os.environ['XDG_CONFIG_HOME'] = tempfile.mkdtemp(prefix='pyposlib-config-')
+os.environ.pop('POS_ARCHIVE_TOKEN', None)
 POSLIB = Path(os.environ.get('POSLIB', HERE.parent / 'poslib'))
 FIXTURES = POSLIB / 'fixtures'
 

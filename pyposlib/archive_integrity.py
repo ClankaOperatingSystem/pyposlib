@@ -593,8 +593,9 @@ def fold(entries, empty=(), blocks=None):
 
 
 def keeper_of(url):
-    """The keeper at url, over HTTP, with the bearer token in the environment's
-    POS_ARCHIVE_TOKEN: what a check asks and a seal is sent to by default."""
+    """The keeper at url, over HTTP: what a check asks and a seal is sent to
+    by default. Its requests carry the bearer token in the environment's
+    POS_ARCHIVE_TOKEN, else the one kept for the keeper by signing in."""
     from . import remote  # it imports this module
     return remote.HttpRemoteArchive(url, os.environ.get('POS_ARCHIVE_TOKEN'))
 
@@ -880,6 +881,8 @@ USAGE = """Usage: COMMAND ...  (help prints this; Emacs itself takes --help)
       bring each schema 2 ledger under ROOT to schema 3, once it is clean
   keep ROOT
       move to its keeper each archive under ROOT a keeper is to keep
+  sign-in URL
+      sign in to the keeper at URL, in a browser, and keep the token
 
 --apply applies a program's own plan at once and prints both.
 Exit 0 done or clean, 1 findings, 2 refused.
@@ -899,7 +902,7 @@ def checkpoint_root(root):
 def main(args=None):
     """The command line poslib's pos-seal-batch has, command for command."""
     args = sys.argv[1:] if args is None else args
-    if args[:1] in (['seal'], ['write-new'], ['apply'], ['convert'], ['keep']):
+    if args[:1] in (['seal'], ['write-new'], ['apply'], ['convert'], ['keep'], ['sign-in']):
         from . import seal
         return seal.main(args)
     try:
