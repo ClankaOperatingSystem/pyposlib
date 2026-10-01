@@ -69,22 +69,45 @@ class RemoteArchive(Protocol):
 # ------------------------------------------------------------------ keeping
 
 class Keeper:
-    """The keeping side of the protocol, in memory.
+    """The keeping side of the protocol.
 
     It keeps a ledger's events and the blocks of what they enrol, and
     takes nothing on trust: an event must be the next of a valid chain,
     a file's bytes must hash to the CID they are sent under, and once
     the ledger is of schema 3 its fold must give the event's root with
-    every enrolled file held."""
+    every enrolled file held.
 
-    def __init__(self, ledger_id=None):
+    Alone it keeps everything in memory. A server gives it what it
+    already holds: events, the ledger's (name, bytes) in order; blocks,
+    a mapping of CID to bytes that may be shared between ledgers, of
+    which it uses only membership, reading and assignment; and erased,
+    a mapping of CID to when. It writes blocks before it counts an
+    event appended, so that whoever records the event after append
+    returns records nothing whose bytes are not held."""
+
+    def __init__(self, ledger_id=None, events=(), blocks=None, erased=None):
         self.ledger_id = ledger_id
-        self.events, self.claims, self.blocks, self.erased = [], [], {}, {}
-        self._cids = {}
+        self.events, self.claims = list(events), []
+        self.blocks = {} if blocks is None else blocks
+        self.erased = {} if erased is None else erased
+        self._cids = None
 
     def _state(self, events):
         entries, head, root, _, _, empty = ai.chain(events)
         return entries, head, root, empty
+
+    def cids(self):
+        """What the ledger folds to, {path: cid}; nothing while it holds a
+        legacy entry or no event."""
+        if self._cids is None:
+            self._cids = {}
+            if self.events:
+                entries, _, _, empty = self._state(self.events)
+                try:
+                    self._cids = ai.fold(entries, empty)
+                except Refused:
+                    pass
+        return self._cids
 
     def describe(self):
         head, root = None, None
@@ -116,19 +139,26 @@ class Keeper:
         value = json.loads(event)
         if self.ledger_id not in (None, value.get('ledger_id')):
             raise Refused('identity', 'The event is another ledger\'s')
-        cids = {}
+        # What was kept before this event: everything, if the event before
+        # was of schema 3; nothing, if the ledger is only now being kept.
+        kept = bool(self.events) and ai.is_event_cid(ai.EVENT_NAME.fullmatch(self.events[-1][0])[2])
+        before = set(self.cids().values()) if kept else set()
+        cids, directories = None, {}
         if value['schema'] == 3:
-            blocks = {}
-            cids = ai.fold(entries, empty, blocks)
+            cids = ai.fold(entries, empty, directories)
             if cids['.'] != root:
                 raise Refused('root', 'The ledger does not fold to the event\'s root')
-            held = {**self.blocks, **files}
-            for path, entry in entries.items():
-                if entry['cid'] not in held and not any(part.startswith('.') for part in path.split('/')):
+            for path in (value['add'] if kept else entries):
+                given = entries[path]['cid']
+                if (given not in files and given not in self.blocks
+                        and not any(part.startswith('.') for part in path.split('/'))):
                     raise Refused('entry', f'Bytes not held for {path}')
-            self.blocks.update(blocks)
         for data in files.values():
-            self.blocks.update(cid.blocks(data))
+            for given, block in cid.blocks(data).items():
+                self.blocks[given] = block
+        for given, block in directories.items():
+            if given not in before:
+                self.blocks[given] = block
         self.blocks[ai.event_cid(ai.as_block(event))] = ai.as_block(event)
         self.events.append((name, event))
         self.claims.append(dict(claims))
@@ -138,11 +168,12 @@ class Keeper:
 
     def holds(self, cid_text):
         """Whether the ledger enrols cid_text: a file, a directory or an event."""
-        return (cid_text in self._cids.values()
+        return (cid_text in self.cids().values()
                 or any(ai.event_cid(ai.as_block(data)) == cid_text for _, data in self.events))
 
     def erase(self, cid_text, when):
-        """Forget the bytes of cid_text, and say when: the ledger is unchanged."""
+        """Forget the bytes of cid_text, and say when: the ledger is unchanged.
+        Where blocks are shared between ledgers, forgetting is the server's."""
         if not self.holds(cid_text):
             raise Refused('absent', f'Not held: {cid_text}')
         self.blocks.pop(cid_text, None)
