@@ -179,6 +179,41 @@ class Protocol(unittest.TestCase):
             self.assertEqual((head, root), (described['head'], described['root']))
             self.assertEqual(b'y', client.read(root, 'b/y.txt'))
 
+    def test_a_keeper_is_given_what_a_server_already_holds(self):
+        """Another keeper over the same events and blocks answers as the
+        first did, and a later seal asks its store only for what it adds."""
+        class Store(dict):
+            def __init__(self):
+                super().__init__()
+                self.asked, self.written = [], []
+
+            def __contains__(self, key):
+                self.asked.append(key)
+                return super().__contains__(key)
+
+            def __setitem__(self, key, value):
+                self.written.append(key)
+                super().__setitem__(key, value)
+
+        with Scope() as scope:
+            first = scope.seal('first', {'a.txt': b'first', 'sub/b.txt': b'b'})
+            second = scope.seal('second', {'c.txt': b'second'})
+            store = Store()
+            keeper = remote.Keeper(blocks=store)
+            over(keeper).append(*first, {})
+            again = remote.Keeper(LEDGER_ID, keeper.events, store)
+            folded = ai.fold_cids(scope.scope / 'archives')
+            self.assertEqual(keeper.describe(), again.describe())
+            self.assertEqual(b'b', over(again).read(folded['first'], 'sub/b.txt'))
+            store.asked.clear()
+            store.written.clear()
+            over(again).append(*second, {})
+            self.assertEqual([], store.asked)
+            self.assertEqual({folded['second/c.txt'], folded['second'], folded['.'],
+                              again.describe()['head']}, set(store.written))
+            self.assertEqual(b'second', over(remote.Keeper(LEDGER_ID, again.events, store)).read(
+                folded['.'], 'second/c.txt'))
+
     def test_an_erased_block_is_gone_and_said_to_be(self):
         with Scope() as scope:
             name, event, files = scope.seal('first', {'a.txt': b'first'})
