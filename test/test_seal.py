@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 import unittest
 
-from fixtures import fixtures, write, writable
+from fixtures import Tape, fixtures, write, writable
 from test_formats import Built
 from pyposlib import archive_integrity as ai
 from pyposlib import cid
@@ -50,29 +50,6 @@ def absolute_plan(plan, root):
             for k, v in plan.items()}
 
 
-class Tape:
-    """A keeper that is a fixture's recording: each request must be the next
-    one recorded, and is answered as it was."""
-
-    def __init__(self, recorded):
-        self.url, self.token = recorded['url'], recorded['token']
-        self.left = list(recorded['exchanges'])
-
-    def send(self, method, url, headers, body):
-        if not self.left:
-            raise AssertionError(f'A request the recording does not have: {method} {url}')
-        exchange = self.left.pop(0)
-        sent = dict(method=method, path=url[len(self.url):], authorization=headers.get('Authorization'))
-        if body is not None:
-            sent.update(content_type=headers['Content-Type'], body_sha256=ai.sha(body))
-        if sent != exchange['request']:
-            raise AssertionError(f"Not the request recorded: {sent} for {exchange['request']}")
-        return exchange['response']['status'], exchange['response']['body'].encode()
-
-    def client(self):
-        return remote.HttpRemoteArchive(self.url, self.token, self.send)
-
-
 def run(fixture, root):
     """Seal fixture, built in root; what happened, relative to root.
     An item holding Org or Markdown is poslib's to plan: its plan comes from
@@ -97,7 +74,8 @@ def run(fixture, root):
         scope = Path(plan['archive']).parent
         return dict(plan=relative_plan(plan, root),
                     event=dict(name=event.name, encoded=event.read_bytes().decode()),
-                    report=relative_report(ai.report(scope), root))
+                    # The recording is of the seal: the report after it asks no keeper.
+                    report=relative_report(ai.report(scope, ask=False), root))
     except ai.Refused as refused:
         if tape and tape.left:
             raise AssertionError('Refused before the recording was played out')

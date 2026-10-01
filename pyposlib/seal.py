@@ -394,7 +394,7 @@ def apply_kept(plan, expected, keeper, claims):
     if ai.kept(archive) != plan['kept']:
         raise Refused('plan', f'The archive is not kept as planned: {archive}')
     if keeper is None:
-        keeper = remote.HttpRemoteArchive(plan['kept'], os.environ.get('POS_ARCHIVE_TOKEN'))
+        keeper = ai.keeper_of(plan['kept'])
     if claims is None:
         claims = claims_of(plan, expected)
     catch_up(archive, ledger, keeper)

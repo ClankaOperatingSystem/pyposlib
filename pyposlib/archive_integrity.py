@@ -592,7 +592,35 @@ def fold(entries, empty=(), blocks=None):
                              empty=empty, blocks=blocks)
 
 
-def report(root):
+def keeper_of(url):
+    """The keeper at url, over HTTP, with the bearer token in the environment's
+    POS_ARCHIVE_TOKEN: what a check asks and a seal is sent to by default."""
+    from . import remote  # it imports this module
+    return remote.HttpRemoteArchive(url, os.environ.get('POS_ARCHIVE_TOKEN'))
+
+
+def asked(url, cids, ask, keeper):
+    """What the keeper at url has of a ledger, for its archive's report: head
+    and events as it describes them, and erased, the paths the ledger enrols,
+    by cids, whose bytes the keeper has erased. None if no keeper is to be
+    asked. Refuses as the keeper does."""
+    if ask is None:
+        ask = not os.environ.get('POS_ARCHIVE_OFFLINE')
+    if not ask:
+        return None
+    described = (keeper or keeper_of)(url).describe()
+    erased = set(described['erased'])
+    return dict(head=described['head'], events=described['events'],
+                erased=sorted(path for path, given in cids.items() if given in erased and path != '.'))
+
+
+def report(root, ask=None, keeper_for=None):
+    """The check report on every archive under root.
+
+    An archive a keeper keeps is reported from its ledger, and its keeper is
+    asked what it holds: unless ask is False, or it is None and the
+    environment's POS_ARCHIVE_OFFLINE is set to anything. keeper_for makes a
+    remote.RemoteArchive of a URL, by default keeper_of."""
     reports = []
     archives = roots(root)
     check_anchors(root, archives)
@@ -621,7 +649,9 @@ def report(root):
         hidden = [n for n in actual if any(part.startswith('.') for part in n.split('/'))
                   and not any(part in (META, ANCHORS) for part in n.split('/'))]
         undeclared = [] if keeper else [c for c in collections if not declared(archive / c)]
-        reports.append(dict(archive=str(archive), kept=keeper, head=head, events=count, files=len(actual),
+        reports.append(dict(archive=str(archive), kept=keeper,
+                            keeper=asked(keeper, cids, ask, keeper_for) if keeper else None,
+                            head=head, events=count, files=len(actual),
                             writable=sorted(writable), checkpoint_writable=writable_checkpoints if not reports else [],
                             root=cids.get('.') if cids is not None else None, recorded_root=recorded,
                             hidden=sorted(hidden), undeclared=undeclared, **diff))
@@ -633,7 +663,9 @@ def findings(report):
     return bool(not report['head'] or report['changed'] or report['missing'] or report['new']
                 or report['writable'] or report['checkpoint_writable'] or report['hidden']
                 or report['undeclared']
-                or (report['recorded_root'] is not None and report['recorded_root'] != report['root']))
+                or (report['recorded_root'] is not None and report['recorded_root'] != report['root'])
+                # A keeper asked, whose head is not the ledger's.
+                or (report['keeper'] is not None and report['keeper']['head'] != report['head']))
 
 
 def capsule(directory):
