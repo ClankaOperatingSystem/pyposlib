@@ -162,12 +162,69 @@ class Formats(unittest.TestCase):
 
     def ledger_report(self, fixture, root):
         base = root.resolve()
+        if 'error' in fixture:
+            self.assertEqual(fixture['error'], refusal(lambda: ai.report(root)))
+            return
         report = ai.report(root)
         for item in report:
             item['archive'] = Path(item['archive']).relative_to(base).as_posix()
             item['checkpoint_writable'] = [Path(p).relative_to(base).as_posix()
                                            for p in item['checkpoint_writable']]
         self.assertEqual(ai.encoded(fixture['report']), ai.encoded(report))
+
+
+class Kept(unittest.TestCase):
+    """An archive a keeper keeps, as its repository's .pos/config.yaml says."""
+
+    def test_a_scope_s_own_repository_says_how_its_archive_is_kept(self):
+        """The nearest repository at or above a scope decides, by the scope's
+        path in it: a keeper's URL for a remote archive, and disk for every
+        other. A repository mounted beneath another is not its container's
+        to configure."""
+        root = Path(tempfile.mkdtemp(prefix='pyposlib-')).resolve()
+        try:
+            (root / '.git').mkdir()
+            (root / 'projects/c/.git').mkdir(parents=True)
+            (root / '.pos').mkdir()
+            (root / '.pos/config.yaml').write_text(
+                'pos: 1\narchives:\n'
+                '  - scope: "."\n    kept: remote\n    url: https://keeper.example/root\n'
+                '  - scope: projects/a\n    kept: remote\n    url: https://keeper.example/a\n'
+                '  - scope: projects/b\n    kept: uncommitted\n')
+            self.assertEqual('https://keeper.example/root', ai.kept(root / 'archives'))
+            self.assertEqual('https://keeper.example/a', ai.kept(root / 'projects/a/archives'))
+            self.assertIsNone(ai.kept(root / 'projects/b/archives'))
+            self.assertIsNone(ai.kept(root / 'projects/a/projects/d/archives'))
+            self.assertIsNone(ai.kept(root / 'projects/c/archives'))
+        finally:
+            shutil.rmtree(root)
+
+    def test_a_kept_archive_is_checked_by_its_own_path(self):
+        """Named as the root, an archive a keeper keeps is checked though no
+        directory is there."""
+        with Built(dict(fixtures('ledger'))['report-kept']) as root:
+            report = ai.report(root / 'projects/a/archives')
+            self.assertEqual([4], [item['files'] for item in report])
+
+    def test_a_kept_archive_s_vanished_ledger_is_detected(self):
+        """A checkpoint names a kept archive's head; with its ledger gone,
+        nothing is found there and the head is unmatched."""
+        with Built(dict(fixtures('ledger'))['report-kept']) as root:
+            writable(root)
+            shutil.rmtree(root / 'projects/a/archive-integrity')
+            self.assertEqual('anchor', refusal(lambda: ai.report(root)))
+
+    def test_a_kept_archive_is_checkpointed_and_repaired_by_its_ledger(self):
+        """Its files are with its keeper: a checkpoint records its head, and
+        repair protects its ledger's events and looks for nothing else."""
+        with Built(dict(fixtures('ledger'))['report-kept']) as root:
+            scope = root.resolve() / 'projects/a'
+            event = ai.history(scope / 'archives')[3][0]
+            self.assertEqual(str(scope / 'archive-integrity/checkpoints'),
+                             str(ai.checkpoint_root(scope)))
+            event.chmod(0o644)
+            self.assertEqual(dict(repaired=1, unregistered=0), ai.repair(scope))
+            self.assertEqual(0, event.stat().st_mode & 0o222)
 
 
 if __name__ == '__main__':

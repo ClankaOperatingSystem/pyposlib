@@ -118,6 +118,8 @@ def plan(source, destination, ledger_id=None):
     within = next((i for i in [*items, *sealed_collections] if rel == i or rel.startswith(i + '/')), None)
     if within:
         raise Refused('sealed', f'Destination is within sealed {within}: {rel}')
+    if ai.kept(archive):
+        raise Refused('kept', f'Sealing into an archive a keeper keeps is not written: {archive}')
     actual = ai.inventory(archive)
     try:
         cids = cid.cid_tree(archive) if archive.exists() else {}
