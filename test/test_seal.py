@@ -82,7 +82,7 @@ def run(fixture, root):
     try:
         try:
             plan = seal.plan(root / fixture['source'], root / fixture['destination'],
-                             fixture['ledger_id'])
+                             fixture.get('ledger_id'))
         except ai.Refused as refused:
             if refused.kind != 'interpretation' or 'plan' not in fixture:
                 raise
