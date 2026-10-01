@@ -36,6 +36,7 @@ import urllib.request
 from . import archive_integrity as ai
 from .archive_integrity import Refused, encoded, sha
 from . import cid
+from . import signin
 
 VERSION = 1
 
@@ -293,18 +294,30 @@ def send(method, url, headers, body):
 
 class HttpRemoteArchive:
     """RemoteArchive over HTTP: the ledger's base URL, and a bearer token if
-    the keeper wants one. send is the exchange, replaced in tests."""
+    the keeper wants one. Given no token, a request carries the one kept for
+    the keeper by signing in, if there is one (signin). send is the exchange,
+    replaced in tests."""
 
     def __init__(self, url, token=None, send=send):
         self.url, self.token, self.send = url.rstrip('/'), token, send
 
     def call(self, method, path, body=None, content_type=None):
-        headers = {}
-        if self.token:
-            headers['Authorization'] = f'Bearer {self.token}'
-        if content_type:
-            headers['Content-Type'] = content_type
-        status, answer = self.send(method, self.url + path, headers, body)
+        token = self.token or signin.token_for(self.url)
+
+        def exchange(token):
+            headers = {}
+            if token:
+                headers['Authorization'] = f'Bearer {token}'
+            if content_type:
+                headers['Content-Type'] = content_type
+            return self.send(method, self.url + path, headers, body)
+
+        status, answer = exchange(token)
+        if status == 401 and not self.token:
+            # A keeper not seen before may take a token already kept: once.
+            adopted = signin.adopt(self.url)
+            if adopted:
+                status, answer = exchange(adopted)
         if status in (200, 201):
             return answer
         try:
@@ -312,6 +325,8 @@ class HttpRemoteArchive:
             kind, message = refusal['refused'], refusal.get('message', '')
         except (ValueError, KeyError, TypeError):
             kind, message = KIND.get(status, 'remote'), f'{method} {path} answered {status}'
+        if status == 401 and not self.token:
+            message = f'Not signed in to this keeper; sign in with: sign-in {self.url}'
         raise Refused(kind, message)
 
     def describe(self):

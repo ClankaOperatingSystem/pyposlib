@@ -40,6 +40,7 @@ from . import archive_integrity as ai
 from .archive_integrity import Refused, encoded, sha
 from . import cid
 from . import remote
+from . import signin
 
 
 def outermost_archive(path):
@@ -442,7 +443,7 @@ def apply(plan, expected, keeper=None, claims=None):
 
     A plan for an archive a keeper keeps is sent to it: keeper is the
     remote.RemoteArchive to send to, by default the plan's over HTTP with the
-    token in POS_ARCHIVE_TOKEN, and claims what to say of the seal, by default
+    token keeper_of gives it, and claims what to say of the seal, by default
     claims_of."""
     if sha(encoded(plan)) != expected:
         raise Refused('plan', 'Reviewed plan hash mismatch')
@@ -593,6 +594,8 @@ def main(args):
             sys.stdout.buffer.write(encoded(convert(args[1])))
         elif len(args) == 2 and args[0] == 'keep':
             sys.stdout.buffer.write(encoded(keep(args[1])))
+        elif len(args) == 2 and args[0] == 'sign-in':
+            sys.stdout.buffer.write(encoded(signin.sign_in(args[1])))
         elif len(args) == 3 and args[0] == 'apply':
             event, root = apply(json.loads(Path(args[1]).read_bytes()), args[2])
             sys.stdout.buffer.write(encoded(dict(event=str(event), root=root)))
