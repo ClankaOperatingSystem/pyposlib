@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """The fixtures shared with poslib: found in its checkout, built as its doc/formats.org describes."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,8 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
+# A test asks no keeper but one a fixture has recorded; nor does poslib, run from here.
+os.environ['POS_ARCHIVE_OFFLINE'] = '1'
 POSLIB = Path(os.environ.get('POSLIB', HERE.parent / 'poslib'))
 FIXTURES = POSLIB / 'fixtures'
 
@@ -74,3 +77,27 @@ def writable(root):
             path = Path(here) / name
             if not path.is_symlink():
                 path.chmod(path.stat().st_mode | 0o200)
+
+
+class Tape:
+    """A keeper that is a fixture's recording: each request must be the next
+    one recorded, and is answered as it was."""
+
+    def __init__(self, recorded):
+        self.url, self.token = recorded['url'], recorded['token']
+        self.left = list(recorded['exchanges'])
+
+    def send(self, method, url, headers, body):
+        if not self.left:
+            raise AssertionError(f'A request the recording does not have: {method} {url}')
+        exchange = self.left.pop(0)
+        sent = dict(method=method, path=url[len(self.url):], authorization=headers.get('Authorization'))
+        if body is not None:
+            sent.update(content_type=headers['Content-Type'], body_sha256=hashlib.sha256(body).hexdigest())
+        if sent != exchange['request']:
+            raise AssertionError(f"Not the request recorded: {sent} for {exchange['request']}")
+        return exchange['response']['status'], exchange['response']['body'].encode()
+
+    def client(self):
+        from pyposlib import remote
+        return remote.HttpRemoteArchive(self.url, self.token, self.send)

@@ -19,7 +19,7 @@ import shutil
 import tempfile
 import unittest
 
-from fixtures import build, fixtures, writable
+from fixtures import Tape, build, fixtures, writable
 from pyposlib import archive_integrity as ai
 from pyposlib import cid
 
@@ -161,11 +161,17 @@ class Formats(unittest.TestCase):
         self.assertEqual(ai.encoded(fixture['entries']), ai.encoded(entries))
 
     def ledger_report(self, fixture, root):
+        """A fixture that has recorded its keeper is checked asking it, and the
+        recording must be played out; any other asks nobody."""
         base = root.resolve()
+        tape = Tape(fixture['keeper']) if 'keeper' in fixture else None
+        check = (lambda: ai.report(root, ask=True, keeper_for=lambda url: tape.client())) if tape else (
+            lambda: ai.report(root))
         if 'error' in fixture:
-            self.assertEqual(fixture['error'], refusal(lambda: ai.report(root)))
+            self.assertEqual(fixture['error'], refusal(check))
             return
-        report = ai.report(root)
+        report = check()
+        self.assertFalse(tape and tape.left)
         for item in report:
             item['archive'] = Path(item['archive']).relative_to(base).as_posix()
             item['checkpoint_writable'] = [Path(p).relative_to(base).as_posix()
@@ -213,6 +219,27 @@ class Kept(unittest.TestCase):
             writable(root)
             shutil.rmtree(root / 'projects/a/archive-integrity')
             self.assertEqual('anchor', refusal(lambda: ai.report(root)))
+
+    def test_a_keeper_with_another_head_is_a_finding(self):
+        """Asked, a keeper that holds what the ledger has is no finding, and
+        one ahead of it is; what a keeper has erased is not."""
+        for name, expected in (('report-kept-asked', False), ('report-kept-erased', False),
+                               ('report-kept-keeper-ahead', True)):
+            fixture = dict(fixtures('ledger'))[name]
+            with self.subTest(name), Built(fixture) as root:
+                tape = Tape(fixture['keeper'])
+                report = ai.report(root, ask=True, keeper_for=lambda url: tape.client())
+                self.assertEqual(expected, any(ai.findings(item) for item in report))
+
+    def test_a_check_told_to_stay_offline_asks_no_keeper(self):
+        """With POS_ARCHIVE_OFFLINE set, as it is for every test here, a kept
+        archive is reported from its ledger and nothing is sent."""
+        def nobody(url):
+            raise AssertionError('A keeper was asked')
+        with Built(dict(fixtures('ledger'))['report-kept-asked']) as root:
+            (report,) = ai.report(root, keeper_for=nobody)
+            self.assertTrue(report['kept'])
+            self.assertIsNone(report['keeper'])
 
     def test_a_kept_archive_is_checkpointed_and_repaired_by_its_ledger(self):
         """Its files are with its keeper: a checkpoint records its head, and
