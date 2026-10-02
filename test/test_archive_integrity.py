@@ -90,7 +90,8 @@ class IntegrityChecks(unittest.TestCase):
         path.chmod(0o755)
         anchor = next((self.root / '.archive-integrity-anchors').glob('*.json'))
         anchor.chmod(0o644)
-        self.assertTrue(report(self.root)[0]['checkpoint_writable'])
+        # The file's write bit is a finding; the checkpoint's is not.
+        self.assertEqual(['reproduce.sh'], [n for r in report(self.root) for n in r['writable']])
         self.assertEqual(repair(self.root)['repaired'], 2)
         self.assertFalse(anchor.stat().st_mode & 0o222)
         self.assertEqual(path.read_bytes(), before)

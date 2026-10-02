@@ -17,10 +17,6 @@
              (mapcar (lambda (pair)
                        (pcase (car pair)
                          ('archive (cons 'archive (file-relative-name (cdr pair) root)))
-                         ('checkpoint_writable
-                          (cons 'checkpoint_writable
-                                (vconcat (mapcar (lambda (f) (file-relative-name f root))
-                                                 (cdr pair)))))
                          (_ pair)))
                      entry))
            report)))
@@ -44,10 +40,6 @@
                         (mapcar (lambda (pair)
                                   (pcase (car pair)
                                     ('archive (cons 'archive (file-relative-name (cdr pair) root)))
-                                    ('checkpoint_writable
-                                     (cons 'checkpoint_writable
-                                           (vconcat (mapcar (lambda (f) (file-relative-name f root))
-                                                            (cdr pair)))))
                                     (_ pair)))
                                 entry))
                       (pos-ledger-check .path))))

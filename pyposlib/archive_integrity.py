@@ -621,11 +621,13 @@ def report(root, ask=None, keeper_for=None):
     An archive a keeper keeps is reported from its ledger, and its keeper is
     asked what it holds: unless ask is False, or it is None and the
     environment's POS_ARCHIVE_OFFLINE is set to anything. keeper_for makes a
-    remote.RemoteArchive of a URL, by default keeper_of."""
+    remote.RemoteArchive of a URL, by default keeper_of.
+
+    A write bit on a ledger event or a checkpoint is not reported: each is
+    named by a hash of its bytes, and a clone does not keep the bit."""
     reports = []
     archives = roots(root)
     check_anchors(root, archives)
-    writable_checkpoints = [str(p) for p in checkpoint_files(root, archives) if regular(p).st_mode & 0o222]
     for archive in archives:
         known, head, count, metadata, recorded, collections, _, empty = history(archive)
         as_named(archive, metadata)
@@ -644,16 +646,14 @@ def report(root, ask=None, keeper_for=None):
             compared = {n: dict(e, cid=cids.get(n)) if cids is not None and 'cid' in known.get(n, {}) else e
                         for n, e in actual.items()}
             diff = differences(known, compared)
-        writable = [os.path.relpath(p, archive)
-                    for p in [*(archive / n for n in ([] if keeper else actual)), *metadata]
-                    if regular(p).st_mode & 0o222]
+        writable = [] if keeper else [n for n in actual if regular(archive / n).st_mode & 0o222]
         hidden = [n for n in actual if any(part.startswith('.') for part in n.split('/'))
                   and not any(part in (META, ANCHORS) for part in n.split('/'))]
         undeclared = [] if keeper else [c for c in collections if not declared(archive / c)]
         reports.append(dict(archive=str(archive), kept=keeper,
                             keeper=asked(keeper, cids, ask, keeper_for) if keeper else None,
                             head=head, events=count, files=len(actual),
-                            writable=sorted(writable), checkpoint_writable=writable_checkpoints if not reports else [],
+                            writable=sorted(writable),
                             root=cids.get('.') if cids is not None else None, recorded_root=recorded,
                             hidden=sorted(hidden), undeclared=undeclared, **diff))
     return reports
@@ -662,7 +662,7 @@ def report(root, ask=None, keeper_for=None):
 def findings(report):
     """Whether an archive's report has any finding."""
     return bool(not report['head'] or report['changed'] or report['missing'] or report['new']
-                or report['writable'] or report['checkpoint_writable'] or report['hidden']
+                or report['writable'] or report['hidden']
                 or report['undeclared']
                 or (report['recorded_root'] is not None and report['recorded_root'] != report['root'])
                 # A keeper asked, whose head is not the ledger's.
@@ -892,8 +892,7 @@ Exit 0 done or clean, 1 findings, 2 refused.
 def checkpoint_root(root):
     """Record the ledger heads under root once the check is clean; return where."""
     checks = report(root)
-    if any(r['changed'] or r['missing'] or r['new'] or r['writable'] or r['checkpoint_writable']
-           for r in checks):
+    if any(r['changed'] or r['missing'] or r['new'] or r['writable'] for r in checks):
         raise Refused('unclean', f'Enrol new records and restore permissions before checkpointing: {root}')
     checkpoint_heads(root)
     return anchor_home(root)
