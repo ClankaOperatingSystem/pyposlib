@@ -39,8 +39,6 @@ def relative_report(report, root):
     base = root.resolve()
     for item in report:
         item['archive'] = Path(item['archive']).relative_to(base).as_posix()
-        item['checkpoint_writable'] = [Path(p).relative_to(base).as_posix()
-                                       for p in item['checkpoint_writable']]
     return report
 
 

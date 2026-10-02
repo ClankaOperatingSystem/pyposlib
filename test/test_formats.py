@@ -174,8 +174,6 @@ class Formats(unittest.TestCase):
         self.assertFalse(tape and tape.left)
         for item in report:
             item['archive'] = Path(item['archive']).relative_to(base).as_posix()
-            item['checkpoint_writable'] = [Path(p).relative_to(base).as_posix()
-                                           for p in item['checkpoint_writable']]
         self.assertEqual(ai.encoded(fixture['report']), ai.encoded(report))
 
 
