@@ -7,7 +7,7 @@
 
 PYTHON     ?= python3
 IPFS       ?= ipfs
-POSLIB_URL ?= https://github.com/monkeypants/poslib.git
+POSLIB_URL ?= https://github.com/ClankaOperatingSystem/poslib.git
 POSLIB_REF ?= master
 POSLIB     ?= poslib
 
