@@ -12,8 +12,8 @@ requires-python = ">=3.11"
 dependencies = ["PyYAML>=6.0"]
 
 [project.urls]
-Repository = "https://github.com/monkeypants/pyposlib"
-Specification = "https://github.com/monkeypants/poslib"
+Repository = "https://github.com/ClankaOperatingSystem/pyposlib"
+Specification = "https://github.com/ClankaOperatingSystem/poslib"
 
 [project.scripts]
 pyposlib = "pyposlib.archive_integrity:main"

@@ -1,7 +1,7 @@
 #+TITLE: pyposlib
 
 Python library for a personal OS in Org files, beside the Emacs Lisp
-[[https://github.com/monkeypants/poslib][poslib]]: two implementations, in lockstep, of the formats poslib's
+[[https://github.com/ClankaOperatingSystem/poslib][poslib]]: two implementations, in lockstep, of the formats poslib's
 =doc/formats.org= specifies and of the configuration its
 =doc/pos-directory.txt= specifies. Org interpretation is poslib's alone.
 
@@ -43,7 +43,7 @@ It needs Python 3.11 or later, and PyYAML for =tree.py=; the rest uses
 nothing outside the standard library.
 Install it from the repository at a tag:
 
-: pip install "pyposlib @ git+https://github.com/monkeypants/pyposlib.git@v0.1.0"
+: pip install "pyposlib @ git+https://github.com/ClankaOperatingSystem/pyposlib.git@v0.1.0"
 
 Commands: =seal SOURCE DESTINATION [--apply]=, =write-new DESTINATION
 [--apply]= (the record on standard input), =apply PLAN HASH=, =check ROOT=,
