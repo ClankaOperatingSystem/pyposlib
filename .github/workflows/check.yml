@@ -22,7 +22,7 @@ jobs:
         env:
           KUBO: v0.43.1
         run: |
-          curl -fsSLO https://dist.ipfs.tech/kubo/$KUBO/kubo_${KUBO}_linux-amd64.tar.gz
-          curl -fsSL https://dist.ipfs.tech/kubo/$KUBO/kubo_${KUBO}_linux-amd64.tar.gz.sha512 | sha512sum -c
+          curl -fsSLO https://github.com/ipfs/kubo/releases/download/$KUBO/kubo_${KUBO}_linux-amd64.tar.gz
+          curl -fsSL https://github.com/ipfs/kubo/releases/download/$KUBO/kubo_${KUBO}_linux-amd64.tar.gz.sha512 | sha512sum -c
           tar -xzf kubo_${KUBO}_linux-amd64.tar.gz
       - run: make check-ipfs IPFS=kubo/ipfs
