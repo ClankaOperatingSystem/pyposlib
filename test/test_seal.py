@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """Sealing against the fixtures shared with poslib, and its requirements."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -241,6 +242,36 @@ class Sealing(unittest.TestCase):
             self.assertEqual(0, subprocess.run(command + ['--apply'], input=b'handover\n',
                                                capture_output=True).returncode)
             self.assertEqual(target.read_bytes(), b'handover\n')
+
+    def test_a_staging_directory_left_empty_is_not_sealed(self):
+        """An empty _seal in an item, at any depth, is removed and no event
+        records it; one that holds something is sealed as it is, and another
+        empty directory is recorded. The check after the seal is clean."""
+        with Scope() as scope:
+            for name in ('_seal', 'child/_seal', 'kept/_seal', 'hollow'):
+                (scope / 'trial' / name).mkdir(parents=True)
+            write(scope / 'trial' / 'kept' / '_seal' / 'plan.json', b'{}')
+            plan = trial_plan(scope)
+            event, _ = seal.apply(plan, ai.sha(ai.encoded(plan)))
+            archive = scope / 'archives'
+            self.assertEqual(json.loads(event.read_bytes())['empty'], ['trial/child', 'trial/hollow'])
+            self.assertFalse((archive / 'trial' / '_seal').exists())
+            self.assertFalse((archive / 'trial' / 'child' / '_seal').exists())
+            self.assertTrue((archive / 'trial' / 'kept' / '_seal' / 'plan.json').exists())
+            self.assertFalse(any(ai.findings(r) for r in ai.report(scope)))
+
+    def test_a_new_record_leaves_no_staging_directory(self):
+        """A record staged by write-new is sealed and _seal, left empty, is
+        gone; a _seal that holds something else stays."""
+        with Scope() as scope:
+            def sealed(name):
+                plan = seal.stage(b'record\n', scope / 'archives' / name)
+                seal.apply(plan, ai.sha(ai.encoded(plan)))
+            sealed('first.txt')
+            self.assertFalse((scope / '_seal').exists())
+            write(scope / '_seal' / 'other.json', b'{}')
+            sealed('second.txt')
+            self.assertEqual(os.listdir(scope / '_seal'), ['other.json'])
 
     def test_a_sealed_path_has_a_link(self):
         """A sealed item's link is ipfs:// and its CID; a path within it adds
