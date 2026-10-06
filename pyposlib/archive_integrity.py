@@ -806,27 +806,72 @@ def verify_existing(root):
     return checks
 
 
+def missing_directories(archive, known, recorded, empty):
+    """Missing directories needed by the ledger's empty paths, parents first.
+    Validate the folded root and every existing component before returning."""
+    if not empty:
+        return []
+    if fold(known, empty)['.'] != recorded:
+        raise Refused('root', f'Ledger cannot reconstruct the recorded root: {archive}')
+    missing = []
+    for name in empty:
+        path = archive
+        for part in name.split('/'):
+            path = path / part
+            if path.is_symlink() or (path.exists() and not path.is_dir()):
+                raise Refused('differs', f'Recorded directory is obstructed: {path}')
+            if not path.exists() and path not in missing:
+                missing.append(path)
+    return missing
+
+
+def read_bits_only(path, entry):
+    """Whether path differs from its entry only in read or write bits."""
+    actual = record(path)
+    if 'cid' in entry:
+        actual['cid'] = cid.cid_file(path)
+    return all((actual[key] & ~0o444) == (value & ~0o444) if key == 'mode'
+               else actual[key] == value for key, value in entry.items())
+
+
 def repair(root):
-    """Protect only verified enrolled files; never enrol or accept changed bytes."""
+    """Restore recorded empty directories and protect verified enrolled files.
+    Restore recorded read bits, but refuse changed bytes or other mode bits,
+    and missing files. Never enrol or rewrite a ledger."""
     checks = report(root)
-    if any(r['changed'] or r['missing'] for r in checks):
+    if any(r['missing'] for r in checks):
         raise Refused('differs', f'Evidence changed or is missing; repair refused: {root}')
+    # Validate every archive and destination before changing any of them.
+    directories = []
+    for item in checks:
+        if not item['kept']:
+            archive = Path(item['archive'])
+            known, _, _, _, recorded, _, _, empty = history(archive)
+            if any(not read_bits_only(archive / name, known[name]) for name in item['changed']):
+                raise Refused('differs', f'Evidence changed; repair refused: {archive}')
+            directories.extend(missing_directories(archive, known, recorded, empty))
+    for path in directories:
+        path.mkdir()
     count = 0
     for item in checks:
         archive = Path(item['archive'])
         known, _, _, metadata = history(archive)[:4]
         # A keeper holds a kept archive's files; only its ledger is here.
-        for path in [*(archive / name for name in ([] if item['kept'] else known)), *metadata]:
+        targets = [(archive / name, entry['mode']) for name, entry in known.items()
+                   if not item['kept']]
+        for path, recorded_mode in [*targets, *((p, None) for p in metadata)]:
             mode = stat.S_IMODE(regular(path).st_mode)
-            if mode & 0o222:
-                path.chmod(mode & ~0o222)
+            target = recorded_mode if recorded_mode is not None else mode & ~0o222
+            if mode != target:
+                path.chmod(target)
                 count += 1
     for path in checkpoint_files(root, roots(root)):
         mode = stat.S_IMODE(regular(path).st_mode)
         if mode & 0o222:
             path.chmod(mode & ~0o222)
             count += 1
-    return dict(repaired=count, unregistered=sum(len(r['new']) for r in checks))
+    return dict(repaired=count, restored=len(directories),
+                unregistered=sum(len(r['new']) for r in checks))
 
 
 def archive_for(path):
@@ -888,7 +933,7 @@ USAGE = """Usage: COMMAND ...  (help prints this; Emacs itself takes --help)
   checkpoint ROOT
       record the ledger heads under ROOT, once the check is clean
   repair ROOT
-      remove write bits from verified evidence; never enrols
+      restore recorded directories and read bits; remove write bits; never enrols
   convert ROOT
       bring each schema 2 ledger under ROOT to schema 3, once it is clean
   keep ROOT

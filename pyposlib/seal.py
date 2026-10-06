@@ -248,11 +248,11 @@ def leave_stage(source):
 
 def drop_staging(top):
     """Remove each staging directory left empty under top, an item. Hidden
-    directories are not entered, nor links followed."""
+    directories and nested archives are not entered, nor links followed."""
     if not top.is_dir() or top.is_symlink():
         return
     for name in sorted(os.listdir(top)):
-        if name.startswith('.'):
+        if name.startswith('.') or name == 'archives':
             continue
         if is_staging(top / name):
             (top / name).rmdir()

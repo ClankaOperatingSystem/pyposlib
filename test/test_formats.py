@@ -271,7 +271,7 @@ class Kept(unittest.TestCase):
             self.assertEqual(str(scope / 'archive-integrity/checkpoints'),
                              str(ai.checkpoint_root(scope)))
             event.chmod(0o644)
-            self.assertEqual(dict(repaired=1, unregistered=0), ai.repair(scope))
+            self.assertEqual(dict(repaired=1, restored=0, unregistered=0), ai.repair(scope))
             self.assertEqual(0, event.stat().st_mode & 0o222)
 
 

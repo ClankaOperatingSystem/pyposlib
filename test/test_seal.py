@@ -101,6 +101,71 @@ def trial_plan(scope):
 
 
 class Sealing(unittest.TestCase):
+    def test_retirement_preserves_nested_archives(self):
+        with Scope() as scope:
+            archive = scope / 'trial/archives'
+            (archive / 'old/_seal').mkdir(parents=True)
+            write(archive / 'old/record.txt', b'recorded')
+            before = cid.cid_directory(archive)
+            plan = trial_plan(scope)
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            self.assertEqual(before, cid.cid_directory(scope / 'archives/trial/archives'))
+            self.assertTrue((scope / 'archives/trial/archives/old/_seal').is_dir())
+
+    def test_repair_restores_recorded_directories_after_a_clone(self):
+        with Scope() as scope:
+            for name in ('archives/old/_seal', 'ordinary'):
+                (scope / 'trial' / name).mkdir(parents=True)
+            write(scope / 'trial/archives/old/record.txt', b'recorded')
+            (scope / 'trial/result.txt').chmod(0o600)
+            plan = trial_plan(scope)
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            metadata = {p.relative_to(scope): p.read_bytes()
+                        for p in (scope / 'archive-integrity').rglob('*') if p.is_file()}
+            subprocess.run(['git', 'init', '-q', str(scope)], check=True)
+            subprocess.run(['git', 'add', '.'], cwd=scope, check=True)
+            subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.org',
+                            '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Keep the archive'],
+                           cwd=scope, check=True)
+            clone = scope.parent / 'clone'
+            subprocess.run(['git', 'clone', '-q', '--no-local', str(scope), str(clone)], check=True)
+            before = ai.report(clone, ask=False)[0]
+            self.assertNotEqual(before['root'], before['recorded_root'])
+            self.assertEqual(ai.repair(clone)['restored'], 2)
+            self.assertEqual((clone / 'archives/trial/result.txt').stat().st_mode & 0o777, 0o400)
+            self.assertFalse(any(ai.findings(r) for r in ai.report(clone, ask=False)))
+            self.assertEqual(metadata, {p.relative_to(clone): p.read_bytes()
+                                       for p in (clone / 'archive-integrity').rglob('*') if p.is_file()})
+            self.assertEqual(ai.repair(clone), dict(repaired=0, restored=0, unregistered=0))
+
+    def test_repair_validates_all_directories_before_writing(self):
+        for obstruction in ('file', 'symlink', 'changed', 'missing', 'executable'):
+            with self.subTest(obstruction), Scope() as scope:
+                for name in ('a', 'z/leaf'):
+                    (scope / 'trial' / name).mkdir(parents=True)
+                plan = trial_plan(scope)
+                seal.apply(plan, ai.sha(ai.encoded(plan)))
+                item = scope / 'archives/trial'
+                (item / 'a').rmdir()
+                (item / 'z/leaf').rmdir()
+                (item / 'z').rmdir()
+                if obstruction == 'file':
+                    write(item / 'z', b'obstruction')
+                elif obstruction == 'symlink':
+                    (scope / 'outside').mkdir()
+                    (item / 'z').symlink_to(scope / 'outside', target_is_directory=True)
+                elif obstruction == 'changed':
+                    (item / 'result.txt').chmod(0o644)
+                    (item / 'result.txt').write_bytes(b'changed')
+                elif obstruction == 'executable':
+                    (item / 'result.txt').chmod(0o744)
+                else:
+                    (item / 'result.txt').unlink()
+                with self.assertRaises(ai.Refused):
+                    ai.repair(scope)
+                self.assertFalse((item / 'a').exists())
+                self.assertFalse((item / 'z/leaf').exists())
+
     def test_the_ledger_alone_gives_the_archive_s_cids(self):
         """After a seal, the ledger's entries give every CID the archive on
         disk has, root included, without reading the archive."""

@@ -44,6 +44,12 @@
                                 entry))
                       (pos-ledger-check .path))))
          (pos-ledger-refused (concat "refused:" (symbol-name (cadr err))))))
+      ("repair"
+       (condition-case err
+           (let ((root (file-name-as-directory (file-truename .path))))
+             `((result . ,(pos-seal-repair .path))
+               (report . ,(differential-relative root (pos-ledger-check .path)))))
+         (pos-ledger-refused (concat "refused:" (symbol-name (cadr err))))))
       ("seal"
        (condition-case err
            (let* ((root (file-name-as-directory (file-truename .path)))
