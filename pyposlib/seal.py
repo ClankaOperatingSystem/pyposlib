@@ -76,6 +76,61 @@ def link(path):
     return f'ipfs://{found}{rel[len(item):]}'
 
 
+LINK = re.compile(r'ipfs://([^/?#:]+)(?:/([^?#]*))?')
+
+
+def fetch(uri, start=None, keeper_for=None):
+    """The bytes of the archived file uri names, ipfs://CID or ipfs://CID/PATH,
+    as poslib's pos-index-bytes gives them. PATH ends where an Org search
+    begins, at '::'.
+
+    Each scope above start, by default the current directory, is tried,
+    nearest first: the file is the one at PATH beneath whatever the scope's
+    archives hold under CID, or that itself. A file on disk is read as it
+    lies. A file a keeper keeps is read from the keeper by the CID its ledger
+    enrols, and refused 'entry' if the bytes are not that CID's. Refuses
+    'absent' if uri is no such link or no scope has such a file; a directory
+    is not a file. keeper_for makes a remote.RemoteArchive of a URL, by
+    default ai.keeper_of."""
+    match = LINK.match(str(uri))
+    if not match:
+        raise Refused('absent', f'Not an ipfs:// link: {uri}')
+    wanted, path = match[1], (match[2] or '').split('::')[0]
+    here = Path(os.path.abspath(start or '.'))
+    scopes = [d for d in [here, *here.parents]
+              if d.name != 'archives' and ((d / 'archives').is_dir() or ai.kept_here(d))]
+
+    def places(scope, kept):
+        """Each (archive, path within it) the link may name in scope's
+        archives, those a keeper keeps or those on disk."""
+        for archive in ai.roots(scope):
+            if bool(ai.kept(archive)) != kept:
+                continue
+            try:
+                cids = ai.fold_cids(archive) if kept else cid.cid_tree(archive)
+            except cid.ShardingUnsupported:
+                continue
+            for base in sorted(b for b, found in cids.items() if found == wanted):
+                yield archive, '/'.join(part for part in (base, path) if part not in ('', '.'))
+
+    for scope in scopes:
+        try:
+            for archive, rel in places(scope, False):
+                if rel and (archive / rel).is_file():
+                    return (archive / rel).read_bytes()
+        except Refused:
+            continue
+    for scope in scopes:
+        for archive, rel in places(scope, True):
+            entry = ai.history(archive)[0].get(rel)
+            if entry:
+                data = (keeper_for or ai.keeper_of)(ai.kept(archive)).read(entry['cid'])
+                if cid.cid_bytes(data) != entry['cid']:
+                    raise Refused('entry', f'The keeper\'s bytes are not those of {entry["cid"]}')
+                return data
+    raise Refused('absent', f'No archived file for {uri}')
+
+
 def item_files(source, rel):
     """source's files as {path within the archive: file}; hidden and special ones refused."""
     if source.name.startswith('.'):
@@ -650,6 +705,8 @@ def main(args):
             sys.stdout.buffer.write(encoded(keep(args[1])))
         elif len(args) == 2 and args[0] == 'link':
             print(link(args[1]))
+        elif len(args) == 2 and args[0] == 'fetch':
+            sys.stdout.buffer.write(fetch(args[1]))
         elif len(args) == 2 and args[0] == 'sign-in':
             sys.stdout.buffer.write(encoded(signin.sign_in(args[1])))
         elif len(args) == 3 and args[0] == 'apply':

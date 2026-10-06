@@ -368,6 +368,43 @@ class Sealing(unittest.TestCase):
                                   capture_output=True)
             self.assertEqual((done.returncode, done.stdout), (2, b''))
 
+    def test_a_link_s_bytes_are_read_from_disk(self):
+        """The bytes of the file a link names, by its item's CID and its path
+        or by its own CID, from a directory beneath the scope, an Org search
+        after :: left aside. A directory, a CID no archive has and text that
+        is no link are refused as absent."""
+        with Scope() as scope:
+            plan = trial_plan(scope)
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            cids = ai.fold_cids(scope / 'archives')
+            item, file = cids['trial'], cids['trial/result.txt']
+            (scope / 'canon').mkdir()
+            for uri in (f'ipfs://{item}/result.txt', f'ipfs://{item}/result.txt::*A heading',
+                        f'ipfs://{file}', f'ipfs://{file}::a search'):
+                self.assertEqual(seal.fetch(uri, scope / 'canon'), b'result')
+            for uri in (f'ipfs://{item}', 'ipfs://bafkreiaaaa', f'ipfs://{item}/other.txt', 'result.txt'):
+                with self.assertRaises(ai.Refused) as refused:
+                    seal.fetch(uri, scope / 'canon')
+                self.assertEqual(refused.exception.kind, 'absent')
+
+    def test_a_program_prints_a_link_s_bytes(self):
+        """fetch LINK prints the file's bytes as they are, whatever they are; a
+        link to no archived file exits 2 and prints nothing."""
+        import subprocess, sys
+        with Scope() as scope:
+            data = bytes(range(256)) + b'\r\n\xc3\xa9'
+            write(scope / 'trial' / 'bytes.bin', data)
+            plan = trial_plan(scope)
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            item = ai.fold_cids(scope / 'archives')['trial']
+            tool = Path(__file__).resolve().parent.parent / 'archive_integrity.py'
+            done = subprocess.run([sys.executable, '-B', str(tool), 'fetch', f'ipfs://{item}/bytes.bin'],
+                                  capture_output=True, cwd=scope)
+            self.assertEqual((done.returncode, done.stdout), (0, data))
+            done = subprocess.run([sys.executable, '-B', str(tool), 'fetch', f'ipfs://{item}/other.bin'],
+                                  capture_output=True, cwd=scope)
+            self.assertEqual((done.returncode, done.stdout), (2, b''))
+
 
 LEDGER = '0f1e2d3c-4b5a-4968-8778-a6b5c4d3e2f1'
 KEEPER = 'https://keeper.example/ledgers/' + LEDGER
@@ -405,6 +442,26 @@ class KeptScope:
 
 
 class SealingToAKeeper(unittest.TestCase):
+    def test_a_link_s_bytes_are_read_from_its_keeper(self):
+        """The bytes of a file a keeper keeps are read from the keeper by the
+        CID the ledger enrols the file under. Bytes that are not that CID's
+        are refused as entry."""
+        with KeptScope() as kept:
+            kept.seal('trial')
+            cids = ai.fold_cids(kept.scope / 'archives')
+            for uri in (f'ipfs://{cids["trial"]}/result.txt', f'ipfs://{cids["trial/result.txt"]}'):
+                self.assertEqual(seal.fetch(uri, kept.scope, keeper_for=lambda url: kept.client()), b'result')
+            with self.assertRaises(ai.Refused) as refused:
+                seal.fetch(f'ipfs://{cids["trial"]}', kept.scope, keeper_for=lambda url: kept.client())
+            self.assertEqual(refused.exception.kind, 'absent')
+
+            class Other:
+                def read(self, cid_text, path=''):
+                    return b'another'
+            with self.assertRaises(ai.Refused) as refused:
+                seal.fetch(f'ipfs://{cids["trial/result.txt"]}', kept.scope, keeper_for=lambda url: Other())
+            self.assertEqual(refused.exception.kind, 'entry')
+
     def test_what_is_sealed_is_read_back_from_its_keeper(self):
         """The keeper holds the bytes under the CIDs the ledger enrols, and
         nothing of the item is left on disk."""

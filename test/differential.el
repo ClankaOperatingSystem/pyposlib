@@ -8,6 +8,7 @@
 
 (require 'pos-cid)
 (require 'pos-ledger)
+(require 'pos-index)
 (require 'pos-seal)
 
 (defun differential-relative (root report)
@@ -67,6 +68,10 @@
       ("link"
        (condition-case err
            (pos-links-link .path)
+         (pos-ledger-refused (concat "refused:" (symbol-name (cadr err))))))
+      ("fetch"
+       (condition-case err
+           (base64-encode-string (pos-index-bytes .uri .directory) t)
          (pos-ledger-refused (concat "refused:" (symbol-name (cadr err)))))))))
 
 (let* ((tasks (with-temp-buffer

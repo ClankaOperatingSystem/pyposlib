@@ -273,6 +273,49 @@ class DifferentialSeal(unittest.TestCase):
         self.assertTrue(any(link.startswith('ipfs://') and '/' in link[7:] for link in ours))
         self.assertEqual(ours, poslib([dict(kind='link', path=str(path)) for path in paths]))
 
+    @unittest.skipUnless(shutil.which(EMACS), 'needs Emacs')
+    def test_fetched_bytes_agree_on_random_sealed_items(self):
+        """Both give the same bytes, or the same refusal, for the link to
+        every sealed path of random scopes, for the same link with an Org
+        search, and for links to nothing."""
+        import base64
+        rng = random.Random(SEED)
+        seals = []
+        for i in range(10):
+            base = self.work / f'fetch-{i}'
+            archive = base / 'scope' / 'archives'
+            archive.mkdir(parents=True)
+            tree(rng, archive)
+            if rng.random() < 0.5:
+                enrol(base / 'scope')
+            item = base / 'scope' / 'item'
+            item.mkdir()
+            write(item / 'kept.txt', b'kept')
+            write(item / 'bytes.bin', bytes(rng.randrange(256) for _ in range(300)))
+            tree(rng, item)
+            seals.append(dict(kind='seal', path=str(base), source='scope/item',
+                              destination='scope/archives/sealed',
+                              ledger_id='0f1e2d3c-4b5a-4968-8778-a6b5c4d3e2f1'))
+        poslib(seals)
+        tasks = []
+        for task in seals:
+            scope = Path(task['path']) / 'scope'
+            for path in sorted((scope / 'archives' / 'sealed').rglob('*')):
+                link = seal.link(path)
+                tasks += [dict(kind='fetch', uri=link, directory=str(scope)),
+                          dict(kind='fetch', uri=link + '::a search', directory=str(scope))]
+            tasks += [dict(kind='fetch', uri='ipfs://bafkreiaaaa', directory=str(scope)),
+                      dict(kind='fetch', uri='no link', directory=str(scope))]
+        ours = []
+        for task in tasks:
+            try:
+                ours.append(base64.b64encode(seal.fetch(task['uri'], task['directory'])).decode())
+            except ai.Refused as refused:
+                ours.append('refused:' + refused.kind)
+        self.assertTrue(any(not answer.startswith('refused:') for answer in ours))
+        self.assertTrue(any(answer == 'refused:absent' for answer in ours))
+        self.assertEqual(ours, poslib(tasks))
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
