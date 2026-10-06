@@ -13,13 +13,16 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""A repository's .pos/config.yaml, as poslib's doc/pos-directory.txt specifies.
+"""A node's configuration, as poslib's doc/pos-directory.txt specifies.
 
-A repository declares there the repositories mounted beneath it, its
-other working trees, where its scopes' archives are kept and the server
-it is bound to. Two steps bring a tree to what its files declare.
+A node is a repository or a directory of one. Its configuration is in
+.clanka or .pos, as config.yaml or config.yml, and declares what kind of
+node it is, what is beneath it, its other working trees, where its
+scopes' archives are kept and the server it is bound to. Two steps bring
+a tree to what its files declare.
 
 - read_config: a config.yaml's text, checked, with defaults filled in.
+- config_file: the configuration file a node has.
 - plan: what needs to be done for the tree at a root; it changes nothing
   and uses no network.
 - apply: do a plan, if the tree still gives it, and return the plan that
@@ -38,23 +41,35 @@ import sys
 
 import yaml
 
-from .archive_integrity import Refused, encoded
+from .archive_integrity import CONFIG_PATHS, Refused, config_files, encoded
 
-VERSION = 1
-CONFIG_FILE = '.pos/config.yaml'
+VERSION = 2
 
-_PAIR = r'(?:projects|responsibilities)/[^/]+'
-_SCOPE = rf'{_PAIR}(?:/{_PAIR})*'
-_WORKTREE = re.compile(rf'(?:({_SCOPE})/)?_worktrees/([^/]+)')
+_WORKTREE = re.compile(r'(?:(.+)/)?_worktrees/[^/]+')
+_IMAGE = re.compile(r'[^ \t\n"\'#]+')
 _INTEGER = re.compile(r'0|[1-9][0-9]*')
 _UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+# Directories not looked into for what is undeclared; nor are hidden
+# ones and those beginning with an underscore.
+_UNWALKED = ('archives', 'attic', 'node_modules')
 
 
-def _scope_path(path):
-    """Whether path is a scope's path beneath a repository's root: pairs
-    of projects/NAME or responsibilities/NAME."""
-    return (re.fullmatch(_SCOPE, path) is not None
-            and not any(part in ('.', '..') for part in path.split('/')))
+def _path(path):
+    """Whether path is a path beneath a node, relative and going down: it
+    has no empty part, no part that is . or .., and no backslash."""
+    return '\\' not in path and not any(part in ('', '.', '..') for part in path.split('/'))
+
+
+def _location(top, name):
+    """The path top gives for name, less a final slash, or None if it gives
+    none. A path that does not stay beneath its node is refused."""
+    if name not in top:
+        return None
+    value = top[name]
+    path = value[:-1] if len(value) > 1 and value.endswith('/') else value
+    if not _path(path):
+        raise Refused('bad-path', f'Not a path for {name}: {value}')
+    return path
 
 
 def _within(path, container):
@@ -124,12 +139,16 @@ def _own_scope(path, children, what):
 def _children(entries):
     children = []
     for entry in entries:
-        child = _mapping(entry, 'A child', [('path', 'string', True), ('remote', 'string', True),
+        child = _mapping(entry, 'A child', [('path', 'string', True), ('remote', 'string', False),
                                             ('branch', 'string', False), ('skills-up', 'boolean', False)])
-        if not _scope_path(child['path']):
+        if not _path(child['path']):
             raise Refused('bad-path', f"Not a child's path: {child['path']}")
-        children.append({'path': child['path'], 'remote': child['remote'],
-                         'branch': child.get('branch', 'master'),
+        # A branch and skills are a repository's: a child with no remote
+        # is a directory of this one.
+        if 'remote' not in child and ('branch' in child or 'skills-up' in child):
+            raise Refused('bad-value', f"A child with no remote has no branch or skills-up: {child['path']}")
+        children.append({'path': child['path'], 'remote': child.get('remote'),
+                         'branch': child.get('branch', 'master') if 'remote' in child else None,
                          'skills-up': child.get('skills-up', False)})
     for a in children:
         for b in children:
@@ -144,20 +163,18 @@ def _worktrees(entries, children):
         tree = _mapping(entry, 'A worktree', [('path', 'string', True), ('of', 'string', False),
                                               ('remote', 'string', False), ('branch', 'string', False)])
         path = tree['path']
-        match = _WORKTREE.fullmatch(path)
-        if not match or match.group(2) in ('.', '..'):
+        match = _WORKTREE.fullmatch(path) if _path(path) else None
+        if not match:
             raise Refused('bad-path', f"Not a worktree's path: {path}")
         if match.group(1) is not None:
-            if not _scope_path(match.group(1)):
-                raise Refused('bad-path', f"Not a worktree's path: {path}")
             _own_scope(match.group(1), children, 'A worktree')
         if ('of' in tree) == ('remote' in tree):
             raise Refused('bad-value', f'A worktree has one of of and remote: {path}')
         if 'remote' in tree:
             worktrees.append({'path': path, 'remote': tree['remote'],
                               'branch': tree.get('branch', 'master')})
-        elif not any(child['path'] == tree['of'] for child in children):
-            raise Refused('bad-value', f"A worktree is of no declared child: {tree['of']}")
+        elif not any(child['path'] == tree['of'] and child['remote'] is not None for child in children):
+            raise Refused('bad-value', f"A worktree is of no declared child with a remote: {tree['of']}")
         elif 'branch' not in tree:
             raise Refused('missing-key', 'A worktree of a child lacks branch')
         else:
@@ -173,7 +190,7 @@ def _archives(entries, children):
                                                  ('ledger', 'string', False), ('url', 'string', False)])
         scope, kept = archive['scope'], archive['kept']
         if scope != '.':
-            if not _scope_path(scope):
+            if not _path(scope):
                 raise Refused('bad-path', f"Not a scope's path: {scope}")
             _own_scope(scope, children, 'An archive')
         if kept not in ('committed', 'uncommitted', 'remote'):
@@ -201,10 +218,14 @@ def _archives(entries, children):
 
 def read_config(text):
     """The configuration in text, a config.yaml's, checked: a dict of
+    kind, projects, methodologies and image, each a string or None;
     children, worktrees and archives, each a list with its defaults
-    filled in, and server, a dict or None. Every scalar is read as the
-    text written, and the keys' kinds decide what it is. Raises Refused,
-    of a kind doc/pos-directory.txt names, for a file it does not allow."""
+    filled in; and server, a dict or None. kind is 'responsibility' for a
+    node that says where its projects belong, 'project' for one that says
+    where its methodologies belong, and None for one that says neither,
+    which is yet to be configured. Every scalar is read as the text
+    written, and the keys' kinds decide what it is. Raises Refused, of a
+    kind doc/pos-directory.txt names, for a file it does not allow."""
     try:
         parsed = yaml.load(text, Loader=yaml.BaseLoader)
     except yaml.YAMLError:
@@ -216,11 +237,24 @@ def read_config(text):
     known, version = _typed(parsed.get('pos'), 'integer')
     if known and version != VERSION:
         raise Refused('unknown-version', f'Not a version this reader knows: {version}')
-    top = _mapping(parsed, 'The file', [('pos', 'integer', True), ('children', 'sequence', False),
+    top = _mapping(parsed, 'The file', [('pos', 'integer', True), ('projects', 'string', False),
+                                        ('methodologies', 'string', False), ('image', 'string', False),
+                                        ('children', 'sequence', False),
                                         ('worktrees', 'sequence', False), ('archives', 'sequence', False),
                                         ('server', 'mapping', False)])
+    projects, methodologies = _location(top, 'projects'), _location(top, 'methodologies')
+    image = top.get('image')
     children = _children(top.get('children', []))
-    return {'children': children,
+    if projects is not None and methodologies is not None:
+        raise Refused('bad-value', 'A node says where its projects belong or its methodologies, not both')
+    # A tool with no YAML reader finds the image by its line.
+    if image is not None and not (_IMAGE.fullmatch(image)
+                                  and re.search(f'^image: {re.escape(image)}$', text, re.MULTILINE)):
+        raise Refused('bad-value', 'The image is not on one line, as image: NAME, unquoted')
+    return {'kind': ('responsibility' if projects is not None
+                     else 'project' if methodologies is not None else None),
+            'projects': projects, 'methodologies': methodologies, 'image': image,
+            'children': children,
             'worktrees': _worktrees(top.get('worktrees', []), children),
             'archives': _archives(top.get('archives', []), children),
             'server': (_mapping(top['server'], 'The server',
@@ -268,14 +302,32 @@ def _excluded(directory, path):
     return '/' + path in Path(file).read_text(encoding='utf-8').split('\n')
 
 
+def _one_config(files):
+    """The one of files, the configuration paths found in a node, or None;
+    refused if there are two."""
+    if len(files) > 1:
+        raise Refused('two-configurations', f'Two configurations: {", ".join(files)}')
+    return files[0] if files else None
+
+
+def config_file(directory):
+    """The configuration file of the node at directory, relative to it, or
+    None if it has none. Raises Refused, two-configurations, if it has two."""
+    return _one_config(config_files(directory))
+
+
 def _config(directory, branch):
-    """The configuration of the repository at directory, or None if it has
-    none: from branch as committed, or with None from the working tree."""
+    """The configuration of the node at directory, or None if it has none.
+    With branch, directory is a repository and it is read from that branch
+    as committed; with None, from the working tree. A file that is refused
+    is refused, and so are two configurations."""
     if branch is not None:
-        text = _git_line(directory, 'show', f'{branch}:{CONFIG_FILE}')
+        listed = _git_line(directory, 'ls-tree', '--name-only', '-r', branch, '--', *CONFIG_PATHS)
+        file = _one_config([name for name in (listed or '').split('\n') if name])
+        text = None if file is None else _git_line(directory, 'show', f'{branch}:{file}')
     else:
-        file = os.path.join(directory, CONFIG_FILE)
-        text = Path(file).read_text(encoding='utf-8') if os.path.isfile(file) else None
+        file = config_file(directory)
+        text = None if file is None else Path(directory, file).read_text(encoding='utf-8')
     return None if text is None else read_config(text)
 
 
@@ -311,64 +363,112 @@ class _Plan:
         if not _excluded(directory, path):
             self.act('exclude', repository=self.rel(directory), path=path)
 
-    def undeclared(self, directory, declared, prefix=''):
-        """Find the repositories beneath directory that are not among the
-        declared paths, looking into each scope that is not a repository."""
-        for kind in ('projects', 'responsibilities'):
-            base = os.path.join(directory, prefix + kind)
-            if not os.path.isdir(base) or os.path.islink(base):
+    def undeclared(self, repo, mounted, local, prefix=''):
+        """Find what is beneath the repository at repo that no entry
+        declares: a repository, and a directory holding a configuration.
+        mounted are the declared paths of repositories, which are not
+        looked into, and local those of directories, which are; both
+        relative to repo. prefix is the directory being looked in, with
+        its final slash."""
+        for name in sorted(os.listdir(os.path.join(repo, prefix))):
+            path = prefix + name
+            full = os.path.join(repo, path)
+            if path in mounted or os.path.islink(full) or not os.path.isdir(full):
                 continue
-            for name in sorted(os.listdir(base)):
-                path = f'{prefix}{kind}/{name}'
-                full = os.path.join(directory, path)
-                if path in declared or os.path.islink(full) or not os.path.isdir(full):
-                    continue
-                if _is_repository(full):
+            if name in _UNWALKED or name.startswith(('.', '_')):
+                continue
+            if path in local:
+                self.undeclared(repo, mounted, local, path + '/')
+            # A submodule is the repository's own, tracked and declared by git.
+            elif _is_repository(full):
+                if not _tracked(repo, path):
                     self.find('undeclared', self.rel(full))
-                else:
-                    self.undeclared(directory, declared, path + '/')
-
-    def mounts(self, directory, config):
-        """Plan what is mounted in the repository at directory, and return
-        its node."""
-        config = config or {'children': [], 'worktrees': []}
-        children = sorted(config['children'], key=lambda child: child['path'])
-        nodes, held = [], []
-        for child in children:
-            path = os.path.join(directory, child['path'])
-            shown = self.rel(path)
-            self.exclude(directory, child['path'])
-            if _through_link(directory, child['path']):
-                self.find('path-taken', shown, 'a symbolic link')
-            elif _empty(path):
-                self.act('clone', path=shown, remote=child['remote'], branch=child['branch'])
-            elif not _is_repository(path):
-                self.find('path-taken', shown, 'not a repository')
-            elif _git_line(path, 'config', '--get', 'remote.origin.url') != child['remote']:
-                held.append(path)
-                self.find('other-remote', shown)
-            elif _git_line(path, 'symbolic-ref', '--short', '-q', 'HEAD') != child['branch']:
-                held.append(path)
-                self.find('off-branch', shown, 'declared ' + child['branch'])
+            elif config_files(full):
+                self.find('undeclared', self.rel(full), 'a configuration')
             else:
-                try:
-                    nodes.append((child, self.mounts(path, _config(path, child['branch']))))
-                except Refused as refused:
+                self.undeclared(repo, mounted, local, path + '/')
+
+    def declared(self, repo, base, config, mounted, local):
+        """Plan what config declares, the configuration of the node at
+        base, which is the repository at repo or a directory of it. Return
+        (nodes, held): a node for each repository mounted as declared, as
+        (entry, node) with the entry's path relative to repo, and the
+        directories of those that are there and are not planned. The
+        declared paths of repositories are added to mounted and those of
+        directories to local, relative to repo."""
+        nodes, held = [], []
+        if config['kind'] is None:
+            self.find('unconfigured', self.rel(base))
+        for child in sorted(config['children'], key=lambda child: child['path']):
+            path = os.path.join(base, child['path'])
+            within = os.path.relpath(path, repo)
+            shown = self.rel(path)
+            if child['remote'] is not None:
+                mounted.append(within)
+                self.exclude(repo, within)
+                if _through_link(repo, within):
+                    self.find('path-taken', shown, 'a symbolic link')
+                elif _empty(path):
+                    self.act('clone', path=shown, remote=child['remote'], branch=child['branch'])
+                elif not _is_repository(path):
+                    self.find('path-taken', shown, 'not a repository')
+                elif _git_line(path, 'config', '--get', 'remote.origin.url') != child['remote']:
                     held.append(path)
+                    self.find('other-remote', shown)
+                elif _git_line(path, 'symbolic-ref', '--short', '-q', 'HEAD') != child['branch']:
+                    held.append(path)
+                    self.find('off-branch', shown, 'declared ' + child['branch'])
+                else:
+                    try:
+                        nodes.append(({**child, 'path': within},
+                                      self.mounts(path, _config(path, child['branch']))))
+                    except Refused as refused:
+                        held.append(path)
+                        self.find('config-refused', shown, f'{refused.kind}: {refused}')
+            # A directory of this repository: what it declares is planned
+            # as this repository's.
+            elif _through_link(repo, within):
+                self.find('path-taken', shown, 'a symbolic link')
+            elif not os.path.exists(path):
+                self.find('missing', shown)
+            elif not os.path.isdir(path):
+                self.find('path-taken', shown, 'not a directory')
+            elif _is_repository(path):
+                mounted.append(within)
+                self.find('path-taken', shown, 'a repository, declared with no remote')
+            else:
+                local.append(within)
+                try:
+                    own = _config(path, None)
+                    if own is not None:
+                        below = self.declared(repo, path, own, mounted, local)
+                        nodes.extend(below[0])
+                        held.extend(below[1])
+                except Refused as refused:
                     self.find('config-refused', shown, f'{refused.kind}: {refused}')
         for worktree in sorted(config['worktrees'], key=lambda tree: tree['path']):
-            path = os.path.join(directory, worktree['path'])
+            path = os.path.join(base, worktree['path'])
+            within = os.path.relpath(path, repo)
             shown = self.rel(path)
-            self.exclude(directory, worktree['path'])
-            if _through_link(directory, worktree['path']):
+            mounted.append(within)
+            self.exclude(repo, within)
+            if _through_link(repo, within):
                 self.find('path-taken', shown, 'a symbolic link')
             elif _empty(path):
-                source = ({'of': self.rel(os.path.join(directory, worktree['of']))}
+                source = ({'of': self.rel(os.path.join(base, worktree['of']))}
                           if 'of' in worktree else {'remote': worktree['remote']})
                 self.act('clone', path=shown, **source, branch=worktree['branch'])
             elif not _is_repository(path):
                 self.find('path-taken', shown, 'not a repository')
-        self.undeclared(directory, [child['path'] for child in children])
+        return nodes, held
+
+    def mounts(self, directory, config):
+        """Plan what is mounted in the repository at directory, and return
+        its node, with a node for each repository beneath it that is
+        mounted as declared, by this repository or by a directory of it."""
+        mounted, local = [], []
+        nodes, held = self.declared(directory, directory, config, mounted, local) if config else ([], [])
+        self.undeclared(directory, mounted, local)
         return _Node(directory, nodes, held)
 
     def claude_link(self, directory, wanted):
@@ -570,7 +670,7 @@ USAGE = """Usage: COMMAND ...  (help prints this)
 
   plan ROOT
       print what needs to be done for the tree at ROOT to be as its
-      .pos files declare, as JSON; change nothing
+      configurations declare, as JSON; change nothing
   apply ROOT PLAN
       do what the plan in the file PLAN holds, or - for standard input,
       if the tree at ROOT still gives it; print the plan that remains

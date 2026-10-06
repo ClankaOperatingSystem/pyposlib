@@ -43,7 +43,9 @@ INTEGRITY = 'archive-integrity'  # beside an archive: ledger/ and checkpoints/
 META = '.archive-integrity'  # legacy: the ledger inside an archive
 ANCHORS = '.archive-integrity-anchors'  # legacy: checkpoints beside a root
 DECLARATION = b'#+COLLECTION: t'
-CONFIGURATION = '.pos/config.yaml'  # a repository's, at its root: how each scope's archive is kept
+CONFIG_DIRECTORIES = ('.clanka', '.pos')  # a node's configuration directory, the one written first
+CONFIG_NAMES = ('config.yaml', 'config.yml')  # its configuration, within that directory
+CONFIG_PATHS = tuple(f'{directory}/{name}' for directory in CONFIG_DIRECTORIES for name in CONFIG_NAMES)
 
 
 class Refused(ValueError):
@@ -156,32 +158,42 @@ def record(path):
     return dict(sha256=sha(data), size=len(data), mode=stat.S_IMODE(after.st_mode) & ~0o222)
 
 
-def entry_of(archive):
-    """The entry for archive's scope in its repository's configuration, or None.
+def config_files(directory):
+    """The configuration files the node at directory has, relative to it:
+    one, as poslib's doc/pos-directory.txt allows, or none. Two are refused
+    by whoever reads them."""
+    return [path for path in CONFIG_PATHS if os.path.exists(os.path.join(directory, path))]
 
-    The archive's scope is the directory holding it, and its repository the
-    nearest directory at or above the scope that holds .git. The entry is the
-    one under archives in the repository's .pos/config.yaml whose scope is
-    the scope's path there; there is none for a scope it does not name, in a
-    repository without one or in none. Refuses 'config' for a configuration
-    that is refused."""
+
+def entry_of(archive):
+    """The entry for archive's scope in its node's configuration, or None.
+
+    The archive's scope is the directory holding it, and its node the
+    nearest directory at or above the scope that holds a configuration, as
+    doc/pos-directory.txt names one. The entry is the one under archives
+    there whose scope is the scope's path from the node; there is none for
+    a scope it does not name, or beneath no node. Refuses 'config' for a
+    configuration that is refused, and for two in one node."""
     scope = Path(os.path.abspath(archive)).parent
-    root = next((part for part in [scope, *scope.parents] if (part / '.git').exists()), None)
-    if root is None or not (root / CONFIGURATION).exists():
+    node, files = next(((part, found) for part in [scope, *scope.parents]
+                        if (found := config_files(part))), (None, []))
+    if len(files) > 1:
+        raise Refused('config', f'Configuration refused (two-configurations): {node}')
+    if not files:
         return None
-    from . import tree  # needs PyYAML, which only a configured repository asks for
+    from . import tree  # needs PyYAML, which only a configured node asks for
     try:
-        config = tree.read_config((root / CONFIGURATION).read_bytes().decode('utf-8', 'replace'))
+        config = tree.read_config((node / files[0]).read_bytes().decode('utf-8', 'replace'))
     except Refused as refused:
-        raise Refused('config', f'Configuration refused ({refused.kind}): {root / CONFIGURATION}')
-    path = scope.relative_to(root).as_posix()
+        raise Refused('config', f'Configuration refused ({refused.kind}): {node / files[0]}')
+    path = scope.relative_to(node).as_posix()
     return next((a for a in config['archives'] if a['scope'] == path), None)
 
 
 def kept(archive):
     """The base URL of archive's keeper, or None if it is kept on disk. A
-    keeper has the archive of a scope whose entry in its repository's
-    .pos/config.yaml is kept remote; every other is on disk."""
+    keeper has the archive of a scope whose entry in its node's
+    configuration is kept remote; every other is on disk."""
     entry = entry_of(archive)
     return entry['url'] if entry and entry['kept'] == 'remote' else None
 

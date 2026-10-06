@@ -255,7 +255,7 @@ class KeptScope:
         self.dir = Path(tempfile.mkdtemp(prefix='pyposlib-kept-')).resolve()
         (self.dir / '.git').mkdir()
         write(self.dir / '.pos/config.yaml',
-              f'pos: 1\narchives:\n  - scope: projects/a\n    kept: remote\n    url: {KEEPER}\n'.encode())
+              f'pos: 2\nprojects: projects/\narchives:\n  - scope: projects/a\n    kept: remote\n    url: {KEEPER}\n'.encode())
         self.scope = self.dir / 'projects/a'
         write(self.scope / 'trial/result.txt', b'result')
         self.keeper = remote.Keeper()
@@ -344,7 +344,7 @@ class SealingToAKeeper(unittest.TestCase):
         with KeptScope() as kept:
             plan = seal.plan(kept.scope / 'trial', kept.scope / 'archives/trial', LEDGER)
             self.assertEqual(KEEPER, plan['kept'])
-            (kept.dir / '.pos/config.yaml').write_text('pos: 1\n')
+            (kept.dir / '.pos/config.yaml').write_text('pos: 2\nprojects: projects/\n')
             with self.assertRaises(ai.Refused) as refused:
                 seal.apply(plan, ai.sha(ai.encoded(plan)), keeper=kept.client(), claims={})
             self.assertEqual('plan', refused.exception.kind)
@@ -355,7 +355,7 @@ class SealingToAKeeper(unittest.TestCase):
         enrols is read from the keeper as it was on disk, the keeper's root
         is the ledger's, and the check that follows is of a kept archive."""
         with KeptScope() as kept:
-            (kept.dir / '.pos/config.yaml').write_text('pos: 1\n')
+            (kept.dir / '.pos/config.yaml').write_text('pos: 2\nprojects: projects/\n')
             write(kept.scope / 'more/deep/m.txt', b'more')
             for item in ('trial', 'more'):
                 plan = seal.plan(kept.scope / item, kept.scope / 'archives' / item, LEDGER)
@@ -363,7 +363,7 @@ class SealingToAKeeper(unittest.TestCase):
             archive = kept.scope / 'archives'
             before = {path: (archive / path).read_bytes() for path in ai.inventory(archive)}
             write(kept.dir / '.pos/config.yaml',
-                  f'pos: 1\narchives:\n  - scope: projects/a\n    kept: remote\n    url: {KEEPER}\n'.encode())
+                  f'pos: 2\nprojects: projects/\narchives:\n  - scope: projects/a\n    kept: remote\n    url: {KEEPER}\n'.encode())
             got = seal.keep(kept.dir, keeper_for=lambda url: kept.client(), claims={})
             self.assertEqual([(2, 2)], [(item['events'], item['files']) for item in got['kept']])
             self.assertFalse(archive.exists())
