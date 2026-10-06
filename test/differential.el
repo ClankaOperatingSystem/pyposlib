@@ -57,6 +57,10 @@
                                 plan))
                (event . ,(decode-coding-string (pos-ledger--read (car result)) 'utf-8))
                (report . ,(differential-relative root (pos-ledger-check root)))))
+         (pos-ledger-refused (concat "refused:" (symbol-name (cadr err))))))
+      ("link"
+       (condition-case err
+           (pos-links-link .path)
          (pos-ledger-refused (concat "refused:" (symbol-name (cadr err)))))))))
 
 (let* ((tasks (with-temp-buffer

@@ -199,6 +199,41 @@ class DifferentialSeal(unittest.TestCase):
                 ours[at] = 'refused:' + refused.kind
         self.assertEqual(ai.encoded(ours), ai.encoded(theirs))
 
+    @unittest.skipUnless(shutil.which(EMACS), 'needs Emacs')
+    def test_links_agree_on_random_archives(self):
+        """Every path of an archive poslib sealed an item into, a collection
+        or not, has one link or one refusal, and a path that is not there."""
+        rng = random.Random(SEED)
+        seals = []
+        for i in range(10):
+            base = self.work / f'link-{i}'
+            archive = base / 'scope' / 'archives'
+            archive.mkdir(parents=True)
+            tree(rng, archive)
+            if rng.random() < 0.5:
+                enrol(base / 'scope')
+            item = base / 'scope' / 'item'
+            item.mkdir()
+            write(item / 'kept.txt', b'kept')
+            tree(rng, item)
+            if rng.random() < 0.5:
+                write(item / 'README.org', b'#+TITLE: Item\n#+COLLECTION: t\n')
+            seals.append(dict(kind='seal', path=str(base), source='scope/item',
+                              destination='scope/archives/sealed',
+                              ledger_id='0f1e2d3c-4b5a-4968-8778-a6b5c4d3e2f1'))
+        poslib(seals)
+        paths = [path for task in seals
+                 for scope in [Path(task['path']) / 'scope']
+                 for path in [*sorted(scope.rglob('*')), scope / 'archives' / 'absent' / 'file']]
+        ours = []
+        for path in paths:
+            try:
+                ours.append(seal.link(path))
+            except ai.Refused as refused:
+                ours.append('refused:' + refused.kind)
+        self.assertTrue(any(link.startswith('ipfs://') and '/' in link[7:] for link in ours))
+        self.assertEqual(ours, poslib([dict(kind='link', path=str(path)) for path in paths]))
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

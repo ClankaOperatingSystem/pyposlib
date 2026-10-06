@@ -893,6 +893,8 @@ USAGE = """Usage: COMMAND ...  (help prints this; Emacs itself takes --help)
       bring each schema 2 ledger under ROOT to schema 3, once it is clean
   keep ROOT
       move to its keeper each archive under ROOT a keeper is to keep
+  link PATH
+      print the ipfs:// link to PATH, a sealed path in an archive
   sign-in URL
       sign in to the keeper at URL, in a browser, and keep the token
 
@@ -913,7 +915,7 @@ def checkpoint_root(root):
 def main(args=None):
     """The command line poslib's pos-seal-batch has, command for command."""
     args = sys.argv[1:] if args is None else args
-    if args[:1] in (['seal'], ['write-new'], ['apply'], ['convert'], ['keep'], ['sign-in']):
+    if args[:1] in (['seal'], ['write-new'], ['apply'], ['convert'], ['keep'], ['link'], ['sign-in']):
         from . import seal
         return seal.main(args)
     try:
