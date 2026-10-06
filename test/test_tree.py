@@ -91,7 +91,8 @@ def child(path, remote, *more):
 
 def text(*children):
     """A config.yaml's text declaring children, each an entry's text."""
-    return 'pos: 2\nprojects: projects/\nchildren:\n' + ''.join(children)
+    return ('pos: 2\nprojects: projects/\narchives:\n  - scope: .\n    kept: committed\n'
+            + ('children:\n' + ''.join(children) if children else 'children: []\n'))
 
 
 def config(*children):
@@ -103,6 +104,7 @@ def summary(plan):
     lines = []
     for action in plan['actions']:
         lines.append({'exclude': 'exclude {repository} {path}', 'clone': 'clone {path}',
+                      'archive-excludes': 'archive-excludes {repository}',
                       'link': 'link {path} -> {target}', 'unlink': 'unlink {path}'}
                      [action['do']].format(**action))
     return lines + [f'{finding["finding"]} {finding["path"]}' for finding in plan['findings']]
@@ -185,6 +187,97 @@ class Trees(unittest.TestCase):
         self.fail('The tree does not settle')
 
     # Mounts
+
+    def test_each_scopes_archive_obeys_its_own_policy(self):
+        root = repository(self.path('root'), {
+            '.clanka/config.yml': 'pos: 2\nprojects: projects/\nchildren:\n  - path: work\n'
+                                  'archives:\n  - scope: .\n    kept: committed\n',
+            'work/.clanka/config.yml': 'pos: 2\nprojects: projects/\narchives:\n'
+                                       '  - scope: published\n    kept: committed\n',
+            'work/archive-integrity/README': 'The ledger stays in Git.\n',
+        })
+        for name in ('archives', 'work/archives', 'work/old/archives', 'work/published/archives'):
+            write(root, name + '/evidence', 'Retain this.\n')
+        self.settle(root)
+        for name in ('work/archives/evidence', 'work/old/archives/evidence'):
+            result = subprocess.run(['git', 'check-ignore', '-q', name], cwd=root)
+            self.assertEqual(result.returncode, 0, name)
+        for name in ('archives/evidence', 'work/published/archives/evidence'):
+            result = subprocess.run(['git', 'check-ignore', '-q', name], cwd=root)
+            self.assertEqual(result.returncode, 1, name)
+        self.assertTrue(tree._tracked(root, 'work/archive-integrity/README'))
+        self.assertEqual(Path(root, 'work/archives/evidence').read_text(), 'Retain this.\n')
+
+    def test_archive_policy_changes_preserve_other_exclusions_and_files(self):
+        root = repository(self.path('root'), {'.pos/config.yml': 'pos: 2\nprojects: projects/\n'})
+        file = Path(tree._exclude_file(root))
+        file.write_text('/private-file\n')
+        write(root, 'archives/evidence', 'Retain this.\n')
+        self.settle(root)
+        self.assertEqual(subprocess.run(['git', 'check-ignore', '-q', 'archives/evidence'], cwd=root).returncode, 0)
+        stale = self.plan(root)
+        write(root, '.pos/config.yml', text())
+        self.assertEqual(refusal(lambda: tree.apply(root, stale)), 'stale-plan')
+        self.settle(root)
+        self.assertEqual(file.read_text(), '/private-file\n')
+        self.assertEqual(subprocess.run(['git', 'check-ignore', '-q', 'archives/evidence'], cwd=root).returncode, 1)
+        self.assertEqual(Path(root, 'archives/evidence').read_text(), 'Retain this.\n')
+
+    def test_archive_rules_stop_at_products_and_undeclared_nodes(self):
+        root = repository(self.path('root'), {
+            '.pos/config.yml': 'pos: 2\nprojects: projects/\nchildren:\n  - path: product\n'
+                              'archives:\n  - scope: stray\n    kept: uncommitted\n',
+            'product/archives/evidence': 'A product owns this.\n',
+            'stray/.pos/config.yml': 'pos: 2\nprojects: projects/\n',
+            'stray/archives/evidence': 'An undeclared node owns this.\n',
+        })
+        self.settle(root)
+        rules = Path(tree._exclude_file(root)).read_text()
+        self.assertIn('/archives/\n', rules)
+        self.assertNotIn('/product/archives/', rules)
+        self.assertNotIn('/stray/archives/', rules)
+
+    def test_archive_patterns_are_literal_and_future_scopes_are_covered(self):
+        root = repository(self.path('root'), {
+            '.pos/config.yml': 'pos: 2\nprojects: projects/\narchives:\n'
+                              '  - scope: "jobs/[one]* x"\n    kept: uncommitted\n'})
+        self.settle(root)
+        for name in ('jobs/[one]* x/archives/evidence', 'jobs/one x/archives/evidence'):
+            write(root, name, 'evidence\n')
+        self.assertEqual(subprocess.run(['git', 'check-ignore', '-q', 'jobs/[one]* x/archives/evidence'], cwd=root).returncode, 0)
+        self.assertEqual(subprocess.run(['git', 'check-ignore', '-q', 'jobs/one x/archives/evidence'], cwd=root).returncode, 1)
+
+    def test_mounted_archive_policy_comes_from_the_committed_configuration(self):
+        origin = repository(self.path('origin'), {'.pos/config.yml': 'pos: 2\nprojects: projects/\n'})
+        root = repository(self.path('root'), config(child('child', origin)))
+        self.settle(root)
+        mounted = self.path('root/child')
+        write(mounted, '.pos/config.yml', text())
+        write(mounted, 'archives/evidence', 'evidence\n')
+        self.settle(root)
+        self.assertEqual(subprocess.run(['git', 'check-ignore', '-q', 'archives/evidence'], cwd=mounted).returncode, 0)
+
+    def test_archive_only_operation_does_not_clone_or_link(self):
+        root = repository(self.path('root'), {
+            '.pos/config.yml': 'pos: 2\nprojects: projects/\nchildren:\n'
+                              '  - path: missing\n    remote: /nonexistent\n',
+            **skill('own')})
+        remaining = tree.ignore_archives(root)
+        self.assertEqual(remaining, self.plan(root))
+        self.assertNotIn('archive-excludes', [a['do'] for a in remaining['actions']])
+        self.assertFalse(Path(root, 'missing').exists())
+        self.assertFalse(Path(root, '.claude').exists())
+
+    def test_bad_child_configuration_keeps_existing_archive_rules(self):
+        root = repository(self.path('root'), {
+            '.pos/config.yml': text('  - path: child\n'),
+            'child/.pos/config.yml': 'pos: 2\nprojects: projects/\n'})
+        self.settle(root)
+        file = Path(tree._exclude_file(root))
+        before = file.read_bytes()
+        write(root, 'child/.pos/config.yml', 'pos: 999\n')
+        self.settle(root)
+        self.assertEqual(file.read_bytes(), before)
 
     def test_a_repository_that_declares_nothing_needs_nothing(self):
         root = repository(self.path('root'), {'README': 'root\n'})
@@ -310,16 +403,16 @@ class Trees(unittest.TestCase):
         origin = repository(self.path('origins/child'), {'README': 'child\n'})
         root = repository(self.path('root'), {'README': 'root\n'})
         write(root, '.clanka/config.yaml', 'pos: 2\nchildren:\n' + child('work', origin))
-        self.assertEqual(summary(self.plan(root)), ['exclude . work', 'clone work', 'unconfigured .'])
+        self.assertEqual(summary(self.plan(root)), ['exclude . work', 'clone work', 'archive-excludes .', 'unconfigured .'])
 
     def test_a_child_with_no_remote_is_a_directory(self):
-        """Nothing is excluded or cloned for it; one that is not there is
+        """The directory itself is not excluded or cloned; one that is not there is
         found."""
         root = repository(self.path('root'), {'README': 'root\n', 'health/README': 'health\n'})
         write(root, '.clanka/config.yaml',
               'pos: 2\nprojects: projects/\nchildren:\n  - path: health\n  - path: wealth\n'
               '  - path: README\n')
-        self.assertEqual(summary(self.plan(root)), ['path-taken README', 'missing wealth'])
+        self.assertEqual(summary(self.plan(root)), ['archive-excludes .', 'path-taken README', 'missing wealth'])
 
     def test_a_directory_declares_what_is_beneath_it(self):
         """A directory's own configuration mounts a repository beneath it,
@@ -339,7 +432,7 @@ class Trees(unittest.TestCase):
         root = repository(self.path('root'), {'README': 'root\n'})
         repository(self.path('root/health'), {'README': 'h\n'})
         write(root, '.clanka/config.yaml', 'pos: 2\nprojects: projects/\nchildren:\n  - path: health\n')
-        self.assertEqual(summary(self.plan(root)), ['path-taken health'])
+        self.assertEqual(summary(self.plan(root)), ['archive-excludes .', 'path-taken health'])
 
     def test_what_no_entry_declares_is_found_wherever_it_is(self):
         """A repository, and a directory with a configuration, at any depth;
@@ -360,7 +453,7 @@ class Trees(unittest.TestCase):
         repository(self.path('root/attic/lib'), {'README': 'l\n'})
         write(root, '.clanka/config.yaml', 'pos: 2\nprojects: projects/\nchildren:\n  - path: health\n')
         made = self.plan(root)
-        self.assertEqual(summary(made), ['undeclared health/diet', 'undeclared stray/deep',
+        self.assertEqual(summary(made), ['archive-excludes .', 'undeclared health/diet', 'undeclared stray/deep',
                                          'undeclared vendor/lib'])
         self.assertEqual([finding.get('detail') for finding in made['findings']],
                          ['a configuration', 'a configuration', None])
