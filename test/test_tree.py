@@ -165,9 +165,9 @@ class Trees(unittest.TestCase):
         """The plan of the tree at root, which poslib must give too."""
         made = tree.plan(root)
         if shutil.which(EMACS):
-            packages = ('(progn (require (quote package)) (setq package-user-dir "%s") '
-                        '(package-initialize))' % (POSLIB.resolve() / '_deps'))
-            result = subprocess.run([EMACS, '-Q', '--batch', '--eval', packages, '-L', str(POSLIB / 'lisp'),
+            packages = [arg for name in ('markdown-mode', 'yaml')
+                        for arg in ('-L', str(POSLIB.resolve() / '_deps' / name))]
+            result = subprocess.run([EMACS, '-Q', '--batch', *packages, '-L', str(POSLIB / 'lisp'),
                                      '-l', 'pos-tree', '-f', 'pos-tree-batch', 'plan', root],
                                     capture_output=True)
             self.assertIn(result.returncode, (0, 1), result.stderr.decode())

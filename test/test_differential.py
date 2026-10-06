@@ -44,10 +44,10 @@ def poslib(tasks):
     with tempfile.TemporaryDirectory() as work:
         request, answer = Path(work) / 'tasks.json', Path(work) / 'answers.json'
         request.write_text(json.dumps(tasks), encoding='utf-8')
-        # poslib's make deps installs its dependencies into its _deps/.
-        packages = ('(progn (require (quote package)) (setq package-user-dir "%s") '
-                    '(package-initialize))' % (POSLIB.resolve() / '_deps'))
-        result = subprocess.run([EMACS, '-Q', '--batch', '--eval', packages, '-L', str(POSLIB / 'lisp'),
+        # poslib's make deps fetches its dependencies into its _deps/.
+        packages = [arg for name in ('markdown-mode', 'yaml')
+                    for arg in ('-L', str(POSLIB.resolve() / '_deps' / name))]
+        result = subprocess.run([EMACS, '-Q', '--batch', *packages, '-L', str(POSLIB / 'lisp'),
                                  '-l', str(HERE / 'differential.el'), str(request), str(answer)],
                                 capture_output=True, text=True)
         if result.returncode:
