@@ -226,6 +226,37 @@ class Sealing(unittest.TestCase):
                 self.assertEqual(ai.encoded(fixture['report']),
                                  ai.encoded(relative_report(ai.report(root / fixture['root']), root)))
 
+    def test_every_shared_fixture_recalls_the_same_way(self):
+        """What was brought back from a keeper, what was left with its reason
+        and the archive on disk after, or the refusal, as fixtures/ledger/ of
+        kind recall: each request as its keeper recorded it."""
+        for name, fixture in fixtures('ledger'):
+            if fixture['kind'] != 'recall':
+                continue
+            with self.subTest(name), Built(fixture) as root:
+                tape = Tape(fixture['keeper'])
+                try:
+                    got = seal.recall(root / fixture['root'], keeper_for=lambda url: tape.client())
+                except ai.Refused as refused:
+                    self.assertEqual(fixture.get('error'), refused.kind)
+                    self.assertFalse(tape.left)
+                    continue
+                self.assertNotIn('error', fixture)
+                self.assertFalse(tape.left)
+                base = str(root.resolve())
+                for item in got['recalled'] + got['skipped']:
+                    item['archive'] = os.path.relpath(item['archive'], base)
+                self.assertEqual((fixture['recalled'], fixture['skipped']), (got['recalled'], got['skipped']))
+                after = []
+                for here, dirs, files in os.walk(root / fixture['root'] / 'archives'):
+                    for file in files:
+                        path = Path(here) / file
+                        after.append(dict(path=os.path.relpath(path, root), text=path.read_bytes().decode(),
+                                          mode=path.stat().st_mode & 0o777))
+                    if not dirs and not files:
+                        after.append(dict(path=os.path.relpath(here, root), directory=True))
+                self.assertEqual(fixture['after'], sorted(after, key=lambda entry: entry['path']))
+
     def test_every_shared_fixture_seals_the_same_bytes(self):
         for name, fixture in fixtures('ledger'):
             if fixture['kind'] != 'seal':

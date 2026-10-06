@@ -681,6 +681,67 @@ def keep(root, keeper_for=None, claims=None):
     return dict(kept=kept, skipped=skipped)
 
 
+def recall(root, keeper_for=None):
+    """Bring back from its keeper each archive under root that its scope's
+    entry says a keeper keeps: the reverse of keep.
+
+    Every file the ledger enrols and the disk lacks is read from the keeper,
+    by the CID the ledger enrols it under, held to that CID, and written at
+    its path with its recorded mode; the empty directories the ledger records
+    are made. Refused before anything is asked unless the ledger is of schema
+    3 and folds to its recorded root, and what is on disk already is enrolled
+    and unchanged. The keeper must hold the ledger as it is. Interrupted, it
+    resumes. The archive is then on disk as its ledger says, and still its
+    keeper's by its entry, the state keep begins from.
+    {recalled: [{archive, keeper, files}], skipped: [{archive, reason}]}:
+    files are those read.
+    keeper_for makes a remote.RemoteArchive of a URL, by default ai.keeper_of."""
+    recalled, skipped, pending = [], [], []
+    for archive in ai.roots(root):
+        url = ai.kept(archive)
+        entries, head, _, files, recorded, _, _, empty = ai.history(archive)
+        reason = 'on disk' if not url else 'no ledger' if head is None else None
+        if reason:
+            skipped.append(dict(archive=str(archive), reason=reason))
+            continue
+        ai.as_named(archive, files)
+        if not ai.is_event_cid(head):
+            raise Refused('kept', f'A keeper keeps a ledger of schema 3: {archive}')
+        if ai.fold(entries, empty)['.'] != recorded:
+            raise Refused('root', f'The ledger does not fold to its recorded root: {archive}')
+        actual = {}
+        if archive.exists():
+            try:
+                cids = cid.cid_tree(archive)
+            except cid.ShardingUnsupported as unsupported:
+                raise Refused('sharding-unsupported', str(unsupported))
+            actual = {n: dict(e, cid=cids.get(n)) for n, e in ai.inventory(archive).items()}
+        diff = ai.differences(entries, actual)
+        if diff['changed'] or diff['new']:
+            raise Refused('differs', f'What is on disk is not what the ledger enrols: {archive}')
+        pending.append((archive, url, entries, head, files, recorded, empty, diff['missing']))
+    for archive, url, entries, head, files, recorded, empty, missing in pending:
+        keeper = (keeper_for or ai.keeper_of)(url)
+        described = keeper.describe()
+        if (described['head'], described['events'], described['root']) != (head, len(files), recorded):
+            raise Refused('chain', f'The keeper does not hold this ledger as it is: {archive}')
+        read = {}
+        for path in missing:
+            given = entries[path]['cid']
+            if given not in read:
+                read[given] = keeper.read(given)
+                if cid.cid_bytes(read[given]) != given:
+                    raise Refused('entry', f'The keeper\'s bytes are not those of {given}')
+            ai.new_file(archive / path, read[given], entries[path]['mode'])
+        for path in empty:
+            (archive / path).mkdir(parents=True, exist_ok=True)
+        archive.mkdir(parents=True, exist_ok=True)
+        if cid.cid_tree(archive)['.'] != recorded:
+            raise Refused('root', f'The archive brought back is not its recorded root: {archive}')
+        recalled.append(dict(archive=str(archive), keeper=url, files=len(read)))
+    return dict(recalled=recalled, skipped=skipped)
+
+
 def main(args):
     try:
         if args[:1] == ['seal'] and (len(args) == 3 or args[3:] == ['--apply'] and len(args) == 4):
@@ -703,6 +764,8 @@ def main(args):
             sys.stdout.buffer.write(encoded(convert(args[1])))
         elif len(args) == 2 and args[0] == 'keep':
             sys.stdout.buffer.write(encoded(keep(args[1])))
+        elif len(args) == 2 and args[0] == 'recall':
+            sys.stdout.buffer.write(encoded(recall(args[1])))
         elif len(args) == 2 and args[0] == 'link':
             print(link(args[1]))
         elif len(args) == 2 and args[0] == 'fetch':
