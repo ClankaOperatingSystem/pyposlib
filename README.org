@@ -47,7 +47,7 @@ Install it from the repository at a tag:
 
 Commands: =seal SOURCE DESTINATION [--apply]=, =write-new DESTINATION
 [--apply]= (the record on standard input), =apply PLAN HASH=, =check ROOT=,
-=checkpoint ROOT=, =repair ROOT=, =convert ROOT=, =link PATH=, =fetch LINK=
+=checkpoint ROOT=, =repair ROOT=, =convert ROOT=, =keep ROOT=, =recall ROOT=, =link PATH=, =fetch LINK=
 and =help=. Exit 0 done or clean, 1 findings, 2 refused.
 
 * Check
