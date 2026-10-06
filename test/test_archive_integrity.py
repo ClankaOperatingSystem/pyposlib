@@ -208,7 +208,7 @@ class IntegrityChecks(unittest.TestCase):
         self.assertEqual(run('check', str(scope)).returncode, 0)
         new.chmod(0o644)
         self.assertEqual(run('check', str(scope)).returncode, 1)
-        self.assertEqual(json.loads(run('repair', str(scope)).stdout), dict(repaired=1, unregistered=0))
+        self.assertEqual(json.loads(run('repair', str(scope)).stdout), dict(repaired=1, restored=0, unregistered=0))
         checkpointed = json.loads(run('checkpoint', str(scope)).stdout)['checkpointed']
         self.assertEqual(Path(checkpointed), (scope / 'archive-integrity/checkpoints').resolve())
         self.assertIn(b'checkpoint ROOT', run('help').stdout)

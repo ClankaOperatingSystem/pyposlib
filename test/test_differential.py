@@ -146,6 +146,42 @@ class DifferentialSeal(unittest.TestCase):
         shutil.rmtree(self.work)
 
     @unittest.skipUnless(shutil.which(EMACS), 'needs Emacs')
+    def test_repairs_agree_on_missing_directories(self):
+        tasks, ours = [], []
+        for problem in ('none', 'file', 'changed', 'missing', 'read-bits', 'executable'):
+            root = self.work / problem
+            (root / 'item/a').mkdir(parents=True)
+            (root / 'item/z/leaf').mkdir(parents=True)
+            write(root / 'item/result.txt', b'result')
+            if problem == 'read-bits':
+                (root / 'item/result.txt').chmod(0o600)
+            plan = seal.plan(root / 'item', root / 'archives/item')
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            item = root / 'archives/item'
+            (item / 'a').rmdir()
+            (item / 'z/leaf').rmdir()
+            (item / 'z').rmdir()
+            if problem == 'file':
+                write(item / 'z', b'obstruction')
+            elif problem == 'changed':
+                (item / 'result.txt').chmod(0o644)
+                (item / 'result.txt').write_bytes(b'changed')
+            elif problem == 'missing':
+                (item / 'result.txt').unlink()
+            elif problem == 'read-bits':
+                (item / 'result.txt').chmod(0o644)
+            elif problem == 'executable':
+                (item / 'result.txt').chmod(0o744)
+            theirs = self.work / (problem + '-poslib')
+            shutil.copytree(root, theirs)
+            tasks.append(dict(kind='repair', path=str(theirs)))
+            try:
+                ours.append(dict(result=ai.repair(root), report=relative(ai.report(root), root)))
+            except ai.Refused as refused:
+                ours.append('refused:' + refused.kind)
+        self.assertEqual(ai.encoded(ours), ai.encoded(poslib(tasks)))
+
+    @unittest.skipUnless(shutil.which(EMACS), 'needs Emacs')
     def test_seals_agree_on_random_items(self):
         rng = random.Random(SEED)
         tasks, ours, pending = [], [], []
