@@ -234,6 +234,32 @@ def empty_directories(top, rel):
             for p in empty_directories(top / name, f'{rel}/{name}' if rel else name)]
 
 
+def is_staging(path):
+    """Whether path is a staging directory left empty: _seal, holding nothing."""
+    return path.name == '_seal' and path.is_dir() and not path.is_symlink() and not os.listdir(path)
+
+
+def leave_stage(source):
+    """Remove the directory source lay in, if a staging directory left
+    empty. A record staged by write-new leaves it so."""
+    if is_staging(source.parent):
+        source.parent.rmdir()
+
+
+def drop_staging(top):
+    """Remove each staging directory left empty under top, an item. Hidden
+    directories are not entered, nor links followed."""
+    if not top.is_dir() or top.is_symlink():
+        return
+    for name in sorted(os.listdir(top)):
+        if name.startswith('.'):
+            continue
+        if is_staging(top / name):
+            (top / name).rmdir()
+        else:
+            drop_staging(top / name)
+
+
 def event_of(plan, item, add, collections, empty):
     """The event sealing add as item, with its empty directories: its ledger
     file's name, what names it, and its bytes.
@@ -443,6 +469,7 @@ def apply_kept(plan, expected, keeper, claims):
         if not source.exists():
             raise Refused('plan', f'The item is not where it was planned: {source}')
         rewrite_source(plan)
+        drop_staging(source)
         held = item_files(source, rel)
         if encoded(plan['add']) != encoded(entries_of(held)):
             raise Refused('plan', f'Item changed since review: {source}')
@@ -456,6 +483,7 @@ def apply_kept(plan, expected, keeper, claims):
             shutil.rmtree(source)
         else:
             source.unlink()
+    leave_stage(source)
     head, _, files = ai.history(archive)[1:4]
     checkpoint(archive, head)
     return files[-1], json.loads(files[-1].read_bytes())['root']
@@ -497,10 +525,12 @@ def apply(plan, expected, keeper=None, claims=None):
         if not source.exists():
             raise Refused('plan', f'Neither before nor after the move: {source}')
         rewrite_source(plan)
+        drop_staging(source)
         if encoded(plan['add']) != encoded(entries_of(item_files(source, rel))):
             raise Refused('plan', f'Item changed since review: {source}')
         destination.parent.mkdir(parents=True, exist_ok=True)
         os.rename(source, destination)
+    leave_stage(source)
     if encoded(plan['add']) != encoded(entries_of({p: archive / p for p in plan['add']})):
         raise Refused('plan', f'Item changed after the move: {destination}')
     if rel not in sealed:

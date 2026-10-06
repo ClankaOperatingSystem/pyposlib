@@ -159,6 +159,9 @@ class DifferentialSeal(unittest.TestCase):
             item = base / 'scope' / 'item'
             item.mkdir()
             tree(rng, item)
+            for held in [item, *(p for p in sorted(item.rglob('*')) if p.is_dir())]:
+                if rng.random() < 0.3:
+                    (held / '_seal').mkdir()
             if rng.random() < 0.3:
                 write(item / 'README.org', b'#+TITLE: Item\n#+COLLECTION: t\n')
             theirs = self.work / f'seal-{i}-poslib'
