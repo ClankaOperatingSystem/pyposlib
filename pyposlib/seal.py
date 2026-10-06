@@ -52,6 +52,30 @@ def outermost_archive(path):
     return found
 
 
+def link(path):
+    """The ipfs:// link to path, a sealed path in an archive, as poslib's
+    pos-links-link gives it: the CID of the sealed item holding it, else of
+    the collection, else of the enrolled file, then the path within it.
+    Refuses 'unsealed' for a path never sealed or in no archive."""
+    target = Path(os.path.abspath(path))
+    archive = outermost_archive(target)
+    if archive is None:
+        raise Refused('unsealed', f'Not a path in an archive: {target}')
+    rel = target.relative_to(archive).as_posix()
+    entries, _, _, _, _, sealed_collections, items, _ = ai.history(archive)
+    item = next((i for i in [*items, *sealed_collections] if rel == i or rel.startswith(i + '/')),
+                rel if rel in entries else None)
+    if item is None:
+        raise Refused('unsealed', f'Link to an archived path not sealed: {target}')
+    if ai.kept(archive):
+        found = ai.fold_cids(archive)[item]
+    elif (archive / item).is_dir():
+        found = cid.cid_directory(archive / item)
+    else:
+        found = cid.cid_file(archive / item)
+    return f'ipfs://{found}{rel[len(item):]}'
+
+
 def item_files(source, rel):
     """source's files as {path within the archive: file}; hidden and special ones refused."""
     if source.name.startswith('.'):
@@ -594,6 +618,8 @@ def main(args):
             sys.stdout.buffer.write(encoded(convert(args[1])))
         elif len(args) == 2 and args[0] == 'keep':
             sys.stdout.buffer.write(encoded(keep(args[1])))
+        elif len(args) == 2 and args[0] == 'link':
+            print(link(args[1]))
         elif len(args) == 2 and args[0] == 'sign-in':
             sys.stdout.buffer.write(encoded(signin.sign_in(args[1])))
         elif len(args) == 3 and args[0] == 'apply':

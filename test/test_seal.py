@@ -242,6 +242,36 @@ class Sealing(unittest.TestCase):
                                                capture_output=True).returncode)
             self.assertEqual(target.read_bytes(), b'handover\n')
 
+    def test_a_sealed_path_has_a_link(self):
+        """A sealed item's link is ipfs:// and its CID; a path within it adds
+        the path. A path never sealed, and a path in no archive, are refused."""
+        with Scope() as scope:
+            plan = trial_plan(scope)
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            archive = scope / 'archives'
+            found = ai.fold_cids(archive)['trial']
+            self.assertEqual(seal.link(archive / 'trial'), f'ipfs://{found}')
+            self.assertEqual(seal.link(f'{archive}/trial/'), f'ipfs://{found}')
+            self.assertEqual(seal.link(archive / 'trial' / 'result.txt'), f'ipfs://{found}/result.txt')
+            for path in (archive / 'other', scope / 'trial'):
+                with self.assertRaises(ai.Refused) as refused:
+                    seal.link(path)
+                self.assertEqual(refused.exception.kind, 'unsealed')
+
+    def test_a_program_prints_a_sealed_path_s_link(self):
+        """link PATH prints the link on one line; a path never sealed exits 2."""
+        import subprocess, sys
+        with Scope() as scope:
+            plan = trial_plan(scope)
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            target = scope / 'archives' / 'trial' / 'result.txt'
+            tool = Path(__file__).resolve().parent.parent / 'archive_integrity.py'
+            done = subprocess.run([sys.executable, '-B', str(tool), 'link', str(target)], capture_output=True)
+            self.assertEqual((done.returncode, done.stdout.decode()), (0, seal.link(target) + '\n'))
+            done = subprocess.run([sys.executable, '-B', str(tool), 'link', str(scope / 'archives' / 'other')],
+                                  capture_output=True)
+            self.assertEqual((done.returncode, done.stdout), (2, b''))
+
 
 LEDGER = '0f1e2d3c-4b5a-4968-8778-a6b5c4d3e2f1'
 KEEPER = 'https://keeper.example/ledgers/' + LEDGER
