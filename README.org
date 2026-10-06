@@ -17,12 +17,12 @@ The package is =pyposlib/=:
   =doc/remote-archive-protocol.txt= specifies: the client's port and its
   HTTP wire, and the keeping side, which verifies what it is sent and is
   what a server wraps around its storage.
-- =tree.py= :: a repository's =.pos/config.yaml=, as poslib's
-  =doc/pos-directory.txt= specifies: read and checked, with its defaults
-  filled in; the plan of what a tree needs, which changes nothing; and
-  its application. Its command line is poslib's =pos-tree-batch=, command
-  for command: =python -m pyposlib.tree plan ROOT=, or =pyposlib-tree=
-  installed.
+- =tree.py= :: a node's configuration, in =.clanka/= or =.pos/=, as
+  poslib's =doc/pos-directory.txt= specifies: read and checked, with its
+  defaults filled in; the plan of what a tree needs, which changes
+  nothing; and its application. Its command line is poslib's
+  =pos-tree-batch=, command for command: =python -m pyposlib.tree plan
+  ROOT=, or =pyposlib-tree= installed.
 
 Beside it, =archive_integrity.py= at the top runs the command line from
 a checkout, and =test/= holds the unittest tests.

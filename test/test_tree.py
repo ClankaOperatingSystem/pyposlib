@@ -13,7 +13,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""pyposlib's .pos/config.yaml, against poslib.
+"""pyposlib's reading of a node's configuration, against poslib.
 
 The reader is held to the fixtures in poslib's fixtures/pos-directory/.
 The two steps are tried in real trees: each test makes repositories with
@@ -89,8 +89,13 @@ def child(path, remote, *more):
     return f'  - path: {path}\n    remote: {remote}\n' + ''.join(f'    {line}\n' for line in more)
 
 
+def text(*children):
+    """A config.yaml's text declaring children, each an entry's text."""
+    return 'pos: 2\nprojects: projects/\nchildren:\n' + ''.join(children)
+
+
 def config(*children):
-    return {'.pos/config.yaml': 'pos: 1\nchildren:\n' + ''.join(children)}
+    return {'.pos/config.yaml': text(*children)}
 
 
 def summary(plan):
@@ -137,7 +142,7 @@ class Reader(unittest.TestCase):
 
     def test_a_scalar_is_the_text_written_whatever_yaml_would_make_of_it(self):
         made = tree.read_config(
-            'pos: 1\nchildren:\n  - path: projects/a\n    remote: 2026-10-01\n    branch: 0x1f\n')
+            'pos: 2\nchildren:\n  - path: projects/a\n    remote: 2026-10-01\n    branch: 0x1f\n')
         self.assertEqual(made['children'][0]['remote'], '2026-10-01')
         self.assertEqual(made['children'][0]['branch'], '0x1f')
 
@@ -183,7 +188,7 @@ class Trees(unittest.TestCase):
 
     def test_a_repository_that_declares_nothing_needs_nothing(self):
         root = repository(self.path('root'), {'README': 'root\n'})
-        self.assertEqual(self.plan(root), {'pos': 1, 'actions': [], 'findings': []})
+        self.assertEqual(self.plan(root), {'pos': 2, 'actions': [], 'findings': []})
 
     def test_only_a_repository_is_planned(self):
         self.assertEqual(refusal(lambda: tree.plan(self.dir)), 'not-a-repository')
@@ -256,15 +261,109 @@ class Trees(unittest.TestCase):
 
     def test_a_refused_config_is_found_and_nothing_beneath_planned(self):
         origin = repository(self.path('origins/child'),
-                            {'.pos/config.yaml': 'pos: 1\nteam: []\n', **skill('c')})
+                            {'.pos/config.yaml': 'pos: 2\nteam: []\n', **skill('c')})
         root = repository(self.path('root'), {**config(child('projects/child', origin)), **skill('r')})
         settled = self.settle(root)
         self.assertEqual([line for line in summary(settled) if 'child' in line],
                          ['config-refused projects/child'])
         self.assertEqual(settled['findings'][0]['detail'],
                          'unknown-key: The file has a key this version does not define: team')
-        write(root, '.pos/config.yaml', 'pos: 1\nteam: []\n')
+        write(root, '.pos/config.yaml', 'pos: 2\nteam: []\n')
         self.assertEqual(summary(self.plan(root)), ['config-refused .'])
+
+    # Names, kinds and directories
+
+    def test_a_configuration_has_either_name(self):
+        """Either directory and either file name is read, alike."""
+        origin = repository(self.path('origins/child'), {'README': 'child\n'})
+        for number, file in enumerate(('.clanka/config.yaml', '.clanka/config.yml',
+                                       '.pos/config.yaml', '.pos/config.yml')):
+            with self.subTest(file):
+                root = repository(self.path(f'root-{number}'), {'README': 'root\n'})
+                write(root, file, text(child('work', origin)))
+                self.assertEqual(tree.config_file(root), file)
+                self.assertEqual(summary(self.plan(root)), ['exclude . work', 'clone work'])
+
+    def test_two_configurations_are_refused(self):
+        """Both directories, or both file names in one, and nothing is planned."""
+        for number, other in enumerate(('.pos/config.yaml', '.clanka/config.yml')):
+            with self.subTest(other):
+                root = repository(self.path(f'root-{number}'), {'README': 'root\n'})
+                write(root, '.clanka/config.yaml', 'pos: 2\nprojects: projects/\n')
+                write(root, other, 'pos: 2\nprojects: projects/\n')
+                self.assertEqual(refusal(lambda: tree.config_file(root)), 'two-configurations')
+                self.assertEqual(summary(self.plan(root)), ['config-refused .'])
+
+    def test_a_child_s_configuration_is_read_from_its_branch_by_either_name(self):
+        """A mounted child that names itself .clanka/config.yml declares as
+        any other."""
+        grandchild = repository(self.path('origins/grandchild'), {'README': 'g\n'})
+        middle = repository(self.path('origins/child'),
+                            {'.clanka/config.yml': text(child('deeper', grandchild))})
+        root = repository(self.path('root'), {'README': 'root\n'})
+        write(root, '.clanka/config.yaml', text(child('child', middle)))
+        self.assertEqual(summary(self.settle(root)), [])
+        self.assertTrue(os.path.exists(self.path('root/child/deeper/README')))
+
+    def test_a_node_that_names_neither_location_is_unconfigured(self):
+        """It is found, and what it declares is planned all the same."""
+        origin = repository(self.path('origins/child'), {'README': 'child\n'})
+        root = repository(self.path('root'), {'README': 'root\n'})
+        write(root, '.clanka/config.yaml', 'pos: 2\nchildren:\n' + child('work', origin))
+        self.assertEqual(summary(self.plan(root)), ['exclude . work', 'clone work', 'unconfigured .'])
+
+    def test_a_child_with_no_remote_is_a_directory(self):
+        """Nothing is excluded or cloned for it; one that is not there is
+        found."""
+        root = repository(self.path('root'), {'README': 'root\n', 'health/README': 'health\n'})
+        write(root, '.clanka/config.yaml',
+              'pos: 2\nprojects: projects/\nchildren:\n  - path: health\n  - path: wealth\n'
+              '  - path: README\n')
+        self.assertEqual(summary(self.plan(root)), ['path-taken README', 'missing wealth'])
+
+    def test_a_directory_declares_what_is_beneath_it(self):
+        """A directory's own configuration mounts a repository beneath it,
+        which is excluded in the repository the directory is part of, and
+        is given that repository's skills."""
+        product = repository(self.path('origins/product'), {'README': 'product\n'})
+        root = repository(self.path('root'),
+                          {'employment/.clanka/config.yaml': text(child('widget', product)), **skill('r')})
+        write(root, '.clanka/config.yaml', 'pos: 2\nprojects: projects/\nchildren:\n  - path: employment\n')
+        self.assertEqual([line for line in summary(self.plan(root)) if 'widget' in line],
+                         ['exclude . employment/widget', 'clone employment/widget'])
+        self.assertEqual(summary(self.settle(root)), [])
+        self.assertTrue(os.path.exists(self.path('root/employment/widget/README')))
+        self.assertTrue(os.path.exists(self.path('root/employment/widget/.agents/skills/r/SKILL.md')))
+
+    def test_a_repository_declared_with_no_remote_is_found(self):
+        root = repository(self.path('root'), {'README': 'root\n'})
+        repository(self.path('root/health'), {'README': 'h\n'})
+        write(root, '.clanka/config.yaml', 'pos: 2\nprojects: projects/\nchildren:\n  - path: health\n')
+        self.assertEqual(summary(self.plan(root)), ['path-taken health'])
+
+    def test_what_no_entry_declares_is_found_wherever_it_is(self):
+        """A repository, and a directory with a configuration, at any depth;
+        but not in an archive, an attic, or a hidden or underscore
+        directory."""
+        node = 'pos: 2\nprojects: projects/\n'
+        root = repository(self.path('root'), {'README': 'root\n',
+                                              'health/.clanka/config.yaml': node,
+                                              'health/diet/.pos/config.yml': node,
+                                              'stray/deep/.clanka/config.yaml': node,
+                                              'archives/old/.clanka/config.yaml': node,
+                                              '_work/x/.clanka/config.yaml': node})
+        # A submodule is tracked, and is not found.
+        module = repository(self.path('origins/module'), {'README': 'm\n'})
+        git(root, '-c', 'protocol.file.allow=always', 'submodule', '--quiet', 'add', module, 'tests/module')
+        commit(root)
+        repository(self.path('root/vendor/lib'), {'README': 'l\n'})
+        repository(self.path('root/attic/lib'), {'README': 'l\n'})
+        write(root, '.clanka/config.yaml', 'pos: 2\nprojects: projects/\nchildren:\n  - path: health\n')
+        made = self.plan(root)
+        self.assertEqual(summary(made), ['undeclared health/diet', 'undeclared stray/deep',
+                                         'undeclared vendor/lib'])
+        self.assertEqual([finding.get('detail') for finding in made['findings']],
+                         ['a configuration', 'a configuration', None])
 
     def test_a_worktree_of_a_child_is_excluded_and_cloned(self):
         """One on a branch the child's remote has, one on a branch made for it."""

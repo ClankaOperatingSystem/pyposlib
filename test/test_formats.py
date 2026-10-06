@@ -19,7 +19,7 @@ import shutil
 import tempfile
 import unittest
 
-from fixtures import Tape, build, fixtures, writable
+from fixtures import Tape, build, fixtures, writable, write
 from pyposlib import archive_integrity as ai
 from pyposlib import cid
 
@@ -178,7 +178,7 @@ class Formats(unittest.TestCase):
 
 
 class Kept(unittest.TestCase):
-    """An archive a keeper keeps, as its repository's .pos/config.yaml says."""
+    """An archive a keeper keeps, as its node's configuration says."""
 
     def test_a_scope_s_own_repository_says_how_its_archive_is_kept(self):
         """The nearest repository at or above a scope decides, by the scope's
@@ -191,7 +191,7 @@ class Kept(unittest.TestCase):
             (root / 'projects/c/.git').mkdir(parents=True)
             (root / '.pos').mkdir()
             (root / '.pos/config.yaml').write_text(
-                'pos: 1\narchives:\n'
+                'pos: 2\nprojects: projects/\narchives:\n'
                 '  - scope: "."\n    kept: remote\n    url: https://keeper.example/root\n'
                 '  - scope: projects/a\n    kept: remote\n    url: https://keeper.example/a\n'
                 '  - scope: projects/b\n    kept: uncommitted\n')
@@ -200,6 +200,29 @@ class Kept(unittest.TestCase):
             self.assertIsNone(ai.kept(root / 'projects/b/archives'))
             self.assertIsNone(ai.kept(root / 'projects/a/projects/d/archives'))
             self.assertIsNone(ai.kept(root / 'projects/c/archives'))
+        finally:
+            shutil.rmtree(root)
+
+    def test_an_archive_s_entry_is_in_its_nearest_node(self):
+        """The node is the nearest directory with a configuration, of either
+        name, whether or not it is a repository; two in one node are
+        refused."""
+        root = Path(tempfile.mkdtemp(prefix='pyposlib-')).resolve()
+        try:
+            write(root / '.clanka/config.yml',
+                  b'pos: 2\nprojects: projects/\narchives:\n'
+                  b'  - scope: "."\n    kept: remote\n    url: https://keeper.example/root\n'
+                  b'  - scope: health\n    kept: remote\n    url: https://keeper.example/wrong\n')
+            write(root / 'health/.pos/config.yaml',
+                  b'pos: 2\nprojects: projects/\narchives:\n'
+                  b'  - scope: "."\n    kept: remote\n    url: https://keeper.example/health\n')
+            self.assertEqual('https://keeper.example/root', ai.kept(root / 'archives'))
+            self.assertEqual('https://keeper.example/health', ai.kept(root / 'health/archives'))
+            self.assertIsNone(ai.kept(root / 'health/diet/archives'))
+            write(root / 'health/.clanka/config.yaml', b'pos: 2\nprojects: projects/\n')
+            with self.assertRaises(ai.Refused) as refused:
+                ai.kept(root / 'health/archives')
+            self.assertEqual('config', refused.exception.kind)
         finally:
             shutil.rmtree(root)
 
