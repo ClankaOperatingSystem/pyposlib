@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """Sealing against the fixtures shared with poslib, and its requirements."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -100,6 +101,79 @@ def trial_plan(scope):
 
 
 class Sealing(unittest.TestCase):
+    def test_a_retired_scope_with_empty_staging_survives_a_git_clone(self):
+        with Scope() as scope:
+            (scope / 'trial' / '_seal').mkdir()
+            plan = trial_plan(scope)
+            self.assertEqual(plan['remove_empty_staging'], '_seal')
+            self.assertTrue((scope / 'trial' / '_seal').is_dir())
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            subprocess.run(['git', 'init', '-q', str(scope)], check=True)
+            subprocess.run(['git', 'add', '.'], cwd=scope, check=True)
+            subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.org',
+                            '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Keep the archive'],
+                           cwd=scope, check=True)
+            clone = scope.parent / 'clone'
+            subprocess.run(['git', 'clone', '-q', '--no-local', str(scope), str(clone)], check=True)
+            report = ai.report(clone, ask=False)[0]
+            self.assertEqual(report['recorded_root'], report['root'])
+            self.assertFalse((clone / 'archives' / 'trial' / '_seal').exists())
+
+    def test_staging_removal_preserves_other_empty_directories(self):
+        with Scope() as scope:
+            for name in ('_seal', 'empty', 'archives/old/_seal'):
+                (scope / 'trial' / name).mkdir(parents=True)
+            plan = trial_plan(scope)
+            event, _ = seal.apply(plan, ai.sha(ai.encoded(plan)))
+            self.assertEqual(json.loads(event.read_bytes())['empty'],
+                             ['trial/archives/old/_seal', 'trial/empty'])
+            self.assertEqual(cid.cid_tree(scope / 'archives'), ai.fold_cids(scope / 'archives'))
+
+    def test_nonempty_staging_is_preserved(self):
+        with Scope() as scope:
+            write(scope / 'trial' / '_seal' / 'draft.txt', b'draft')
+            plan = trial_plan(scope)
+            self.assertNotIn('remove_empty_staging', plan)
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            self.assertEqual((scope / 'archives/trial/_seal/draft.txt').read_bytes(), b'draft')
+
+    def test_changed_staging_refuses_before_moving(self):
+        for change in ('file', 'directory', 'hidden', 'symlink', 'unplanned'):
+            with self.subTest(change), Scope() as scope:
+                folder = scope / 'trial' / '_seal'
+                if change != 'unplanned':
+                    folder.mkdir()
+                plan = trial_plan(scope)
+                if change in ('file', 'hidden'):
+                    write(folder / ('.hidden' if change == 'hidden' else 'draft.txt'), b'draft')
+                elif change == 'directory':
+                    (folder / 'empty').mkdir()
+                elif change == 'symlink':
+                    folder.rmdir()
+                    folder.symlink_to(scope / 'archives', target_is_directory=True)
+                else:
+                    folder.mkdir()
+                with self.assertRaises(ai.Refused) as error:
+                    seal.apply(plan, ai.sha(ai.encoded(plan)))
+                self.assertEqual(error.exception.kind, 'plan')
+                self.assertTrue(folder.exists())
+                self.assertFalse((scope / 'archives/trial').exists())
+
+    def test_staging_removal_resumes_before_and_after_the_move(self):
+        for moved in (False, True):
+            with self.subTest(moved=moved), Scope() as scope:
+                folder = scope / 'trial' / '_seal'
+                folder.mkdir()
+                plan = trial_plan(scope)
+                if moved:
+                    (scope / 'trial').rename(scope / 'archives/trial')
+                else:
+                    folder.rmdir()
+                digest = ai.sha(ai.encoded(plan))
+                first = seal.apply(plan, digest)
+                self.assertEqual(first, seal.apply(plan, digest))
+                self.assertFalse((scope / 'archives/trial/_seal').exists())
+
     def test_the_ledger_alone_gives_the_archive_s_cids(self):
         """After a seal, the ledger's entries give every CID the archive on
         disk has, root included, without reading the archive."""

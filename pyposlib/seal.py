@@ -116,6 +116,30 @@ def entries_of(files):
     return dict(sorted((path, entry(file)) for path, file in files.items()))
 
 
+def empty_staging(source):
+    """Whether a directory item's own _seal is a real, completely empty directory."""
+    folder = source / '_seal'
+    return source.is_dir() and not folder.is_symlink() and folder.is_dir() and not any(folder.iterdir())
+
+
+def staging(plan, source, remove=False):
+    """Check the planned removal of source's own empty staging directory.
+    With remove, remove that directory only. Its absence is safe on resumption;
+    a nonempty directory, file or link is never removed."""
+    folder = source / '_seal'
+    if plan.get('remove_empty_staging') == '_seal':
+        if folder.exists() or folder.is_symlink():
+            if not empty_staging(source):
+                raise Refused('plan', f'Staging directory changed since review: {folder}')
+            if remove:
+                try:
+                    folder.rmdir()
+                except OSError as error:
+                    raise Refused('plan', f'Cannot remove empty staging directory: {folder}') from error
+    elif empty_staging(source):
+        raise Refused('plan', f'Empty staging directory was not in the reviewed plan: {folder}')
+
+
 def plan(source, destination, ledger_id=None):
     """The plan to seal source at destination, inside an archive. ledger_id
     names a new ledger; by default it takes the id its scope's entry names,
@@ -174,6 +198,7 @@ def plan(source, destination, ledger_id=None):
                 previous=head, ledger_id=last_id(files) or named or ledger_id or str(uuid.uuid4()),
                 add=entries_of(held), collections=sorted(collections(source, rel)),
                 links=[], originals={}, rumours=[], inventory_sha256=sha(encoded(actual)),
+                **(dict(remove_empty_staging='_seal') if empty_staging(source) else {}),
                 **(dict(kept=keeper) if keeper else {}))
 
 
@@ -427,6 +452,8 @@ def apply_kept(plan, expected, keeper, claims):
     sealed = sealed_so_far(plan)
     if not sealed and sha(encoded(ai.kept_entries(archive, ai.history(archive)[0]))) != plan['inventory_sha256']:
         raise Refused('plan', f'Archive changed since review: {archive}')
+    if rel not in sealed:
+        staging(plan, source)
 
     def send(item, add, collections, empty, files):
         file, _, data = event_of(plan, item, add, collections, empty)
@@ -446,6 +473,7 @@ def apply_kept(plan, expected, keeper, claims):
         held = item_files(source, rel)
         if encoded(plan['add']) != encoded(entries_of(held)):
             raise Refused('plan', f'Item changed since review: {source}')
+        staging(plan, source, remove=True)
         send(rel, plan['add'], plan['collections'], empty_directories(source, rel),
              {plan['add'][path]['cid']: file.read_bytes() for path, file in held.items()})
     # The keeper has the item and the ledger says so: the copy here goes.
@@ -484,6 +512,8 @@ def apply(plan, expected, keeper=None, claims=None):
     if not sealed and not destination.exists():
         if sha(encoded(ai.inventory(archive))) != plan['inventory_sha256']:
             raise Refused('plan', f'Archive changed since review: {archive}')
+    if rel not in sealed:
+        staging(plan, destination if destination.exists() else source)
     for rumour in plan['rumours']:
         there = archive / rumour['destination']
         if rumour['destination'] in sealed:
@@ -499,11 +529,13 @@ def apply(plan, expected, keeper=None, claims=None):
         rewrite_source(plan)
         if encoded(plan['add']) != encoded(entries_of(item_files(source, rel))):
             raise Refused('plan', f'Item changed since review: {source}')
+        staging(plan, source, remove=True)
         destination.parent.mkdir(parents=True, exist_ok=True)
         os.rename(source, destination)
     if encoded(plan['add']) != encoded(entries_of({p: archive / p for p in plan['add']})):
         raise Refused('plan', f'Item changed after the move: {destination}')
     if rel not in sealed:
+        staging(plan, destination, remove=True)
         write_event(plan, destination, plan['add'], plan['collections'])
     for path in [*plan['add'], *(r['destination'] for r in plan['rumours'])]:
         protect(archive / path)
