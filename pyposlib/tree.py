@@ -52,6 +52,39 @@ _UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 # Directories not looked into for what is undeclared; nor are hidden
 # ones and those beginning with an underscore.
 _UNWALKED = ('archives', 'attic', 'node_modules')
+_ARCHIVE_BEGIN = '# BEGIN ClankOS archive excludes\n'
+_ARCHIVE_END = '# END ClankOS archive excludes\n'
+
+
+def _archive_block(text):
+    """The bounds of our block, or None. Refuse damaged or duplicate markers."""
+    if not text.endswith('\n'):
+        text += '\n'
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if line == _ARCHIVE_BEGIN]
+    ends = [i for i, line in enumerate(lines) if line == _ARCHIVE_END]
+    if not starts and not ends:
+        return None
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise Refused('archive-excludes', 'Damaged archive exclude block')
+    return sum(map(len, lines[:starts[0]])), sum(map(len, lines[:ends[0] + 1]))
+
+
+def _archive_text(directory, paths):
+    """The current exclude text and its replacement, preserving other rules."""
+    file = Path(_exclude_file(directory))
+    if file.is_symlink():
+        raise Refused('archive-excludes', 'The exclude file is a symbolic link')
+    old = file.read_text(encoding='utf-8') if file.exists() else ''
+    bounds = _archive_block(old)
+    # Anchored, directory-only patterns; quote Git's glob characters and spaces.
+    patterns = ['/' + re.sub(r'([\\*?\[\] ])', r'\\\1', path) + '/\n' for path in paths]
+    block = _ARCHIVE_BEGIN + ''.join(patterns) + _ARCHIVE_END if paths else ''
+    if bounds:
+        new = old[:bounds[0]] + block + old[bounds[1]:]
+    else:
+        new = old + ('\n' if old and not old.endswith('\n') and block else '') + block
+    return old, new
 
 
 def _path(path):
@@ -348,6 +381,58 @@ class _Plan:
     def __init__(self, root):
         self.root = root
         self.actions, self.findings = [], []
+        self.archive_paths = {}
+        self.archive_refused = set()
+
+    def archives(self, repo, base, config):
+        """Collect this node's uncommitted archives, stopping at child boundaries."""
+        policies = {entry['scope']: entry['kept'] for entry in config['archives']}
+        boundaries = [entry['path'] for entry in config['children'] + config['worktrees']]
+        scopes = {'.', *policies}
+
+        def walk(directory, scope):
+            for name in sorted(os.listdir(directory)):
+                full = os.path.join(directory, name)
+                relative = name if scope == '.' else scope + '/' + name
+                if (os.path.islink(full) or not os.path.isdir(full)
+                        or any(_within(relative, path) for path in boundaries)):
+                    continue
+                if name == 'archives':
+                    scopes.add(scope)
+                elif (name not in _UNWALKED and not name.startswith(('.', '_'))
+                      and not _is_repository(full) and not config_files(full)):
+                    walk(full, relative)
+
+        walk(base, '.')
+        for scope in sorted(scopes):
+            at = base
+            for part in (() if scope == '.' else scope.split('/')):
+                at = os.path.join(at, part)
+                if _is_repository(at) or config_files(at):
+                    break
+            else:
+                at = None
+            if at is not None:
+                continue  # A nearer node owns this scope, even if undeclared.
+            path = os.path.normpath(os.path.join(base, scope, 'archives'))
+            relative = os.path.relpath(path, repo)
+            # Explicit declarations cannot lead through symlinks either.
+            if _through_link(repo, relative):
+                self.find('path-taken', self.rel(path), 'a symbolic link')
+                self.archive_refused.add(repo)
+            elif policies.get(scope, 'uncommitted') == 'uncommitted':
+                self.archive_paths.setdefault(repo, set()).add(relative)
+
+    def archive_excludes(self, repo):
+        if repo in self.archive_refused:
+            return
+        paths = sorted(self.archive_paths.get(repo, set()))
+        try:
+            old, new = _archive_text(repo, paths)
+            if old != new:
+                self.act('archive-excludes', repository=self.rel(repo), paths=paths)
+        except Refused as refused:
+            self.find('config-refused', self.rel(repo), f'{refused.kind}: {refused}')
 
     def rel(self, path):
         return os.path.relpath(path, self.root)
@@ -397,6 +482,7 @@ class _Plan:
         declared paths of repositories are added to mounted and those of
         directories to local, relative to repo."""
         nodes, held = [], []
+        self.archives(repo, base, config)
         if config['kind'] is None:
             self.find('unconfigured', self.rel(base))
         for child in sorted(config['children'], key=lambda child: child['path']):
@@ -445,6 +531,7 @@ class _Plan:
                         nodes.extend(below[0])
                         held.extend(below[1])
                 except Refused as refused:
+                    self.archive_refused.add(repo)
                     self.find('config-refused', shown, f'{refused.kind}: {refused}')
         for worktree in sorted(config['worktrees'], key=lambda tree: tree['path']):
             path = os.path.join(base, worktree['path'])
@@ -469,6 +556,8 @@ class _Plan:
         mounted, local = [], []
         nodes, held = self.declared(directory, directory, config, mounted, local) if config else ([], [])
         self.undeclared(directory, mounted, local)
+        if config:
+            self.archive_excludes(directory)
         return _Node(directory, nodes, held)
 
     def claude_link(self, directory, wanted):
@@ -613,7 +702,13 @@ def _run(directory, *args):
 
 def _do(root, action):
     do = action['do']
-    if do == 'exclude':
+    if do == 'archive-excludes':
+        directory = os.path.join(root, action['repository'])
+        file = Path(_exclude_file(directory))
+        _, new = _archive_text(directory, action['paths'])
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(new, encoding='utf-8')
+    elif do == 'exclude':
         file = Path(_exclude_file(os.path.join(root, action['repository'])))
         file.parent.mkdir(parents=True, exist_ok=True)
         held = file.read_text(encoding='utf-8') if file.exists() else ''
@@ -664,6 +759,14 @@ def apply(root, given):
     return plan(root)
 
 
+def ignore_archives(root):
+    """Apply only archive exclusions from a fresh plan; return the remaining plan."""
+    for action in plan(root)['actions']:
+        if action['do'] == 'archive-excludes':
+            _do(os.path.abspath(root), action)
+    return plan(root)
+
+
 # Command line
 
 USAGE = """Usage: COMMAND ...  (help prints this)
@@ -674,6 +777,9 @@ USAGE = """Usage: COMMAND ...  (help prints this)
   apply ROOT PLAN
       do what the plan in the file PLAN holds, or - for standard input,
       if the tree at ROOT still gives it; print the plan that remains
+  archives ROOT
+      update only the managed archive rules in Git's info/exclude;
+      print the remaining plan; do not clone repositories or link skills
 
 Exit 0 nothing to do, 1 something to do or to report, 2 refused.
 """
@@ -685,6 +791,8 @@ def main(args=None):
     try:
         if len(args) == 2 and args[0] == 'plan':
             made = plan(args[1])
+        elif len(args) == 2 and args[0] == 'archives':
+            made = ignore_archives(args[1])
         elif len(args) == 3 and args[0] == 'apply':
             text = sys.stdin.buffer.read() if args[2] == '-' else Path(args[2]).read_bytes()
             try:
