@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 
 from fixtures import Tape, fixtures, write, writable
 from test_formats import Built
@@ -589,11 +590,33 @@ class SealingToAKeeper(unittest.TestCase):
             self.assertEqual([dict(archive=str(archive), reason='kept')],
                              seal.keep(kept.dir, keeper_for=lambda url: kept.client(), claims={})['skipped'])
 
+    def test_the_tool_commit_is_the_images_else_gits_else_unknown(self):
+        """An image writes COMMIT beside the package; a checkout is asked of
+        git; a plain copy of the files knows no commit."""
+        with tempfile.TemporaryDirectory() as tool:
+            tool = Path(tool)
+            git = lambda *args: subprocess.run(
+                ['git', '-C', str(tool), '-c', 'user.name=A', '-c', 'user.email=a@example.org', *args],
+                check=True, capture_output=True, text=True).stdout.strip()
+            self.assertIsNone(seal.tool_commit(tool))
+            git('init', '-q')
+            self.assertIsNone(seal.tool_commit(tool))
+            (tool / 'README').write_text('pos\n')
+            git('add', 'README')
+            git('commit', '-q', '-m', 'Begin')
+            self.assertEqual(git('rev-parse', 'HEAD'), seal.tool_commit(tool))
+            (tool / 'COMMIT').write_text('eac849ed9d3162cf11017715f771458b1d4e60b5\n')
+            self.assertEqual('eac849ed9d3162cf11017715f771458b1d4e60b5', seal.tool_commit(tool))
+            (tool / 'COMMIT').write_text('not a commit\n')
+            self.assertIsNone(seal.tool_commit(tool))
+
     def test_the_claims_say_where_a_seal_came_from(self):
-        """The plan, the tool, and of a repository git can read: the scope,
-        the commit and branch, whether the tree is dirty, and each remote
-        without the user and password its URL may hold."""
-        with KeptScope() as kept:
+        """The plan, the tool and its commit, and of a repository git can
+        read: the scope, the commit and branch, whether the tree is dirty,
+        and each remote without the user and password its URL may hold."""
+        with KeptScope() as kept, tempfile.TemporaryDirectory() as tool, \
+                unittest.mock.patch.object(seal, 'TOOL_DIRECTORY', Path(tool)):
+            (Path(tool) / 'COMMIT').write_text('eac849ed9d3162cf11017715f771458b1d4e60b5\n')
             shutil.rmtree(kept.dir / '.git')
             git = lambda *args: subprocess.run(
                 ['git', '-C', str(kept.dir), '-c', 'user.name=A', '-c', 'user.email=a@example.org', *args],
@@ -605,14 +628,16 @@ class SealingToAKeeper(unittest.TestCase):
             git('commit', '-q', '-m', 'Configure')
             plan = seal.plan(kept.scope / 'trial', kept.scope / 'archives/trial', LEDGER)
             self.assertEqual(
-                {'plan': 'the hash', 'tool': 'pyposlib', 'scope': 'projects/a',
+                {'plan': 'the hash', 'tool': 'pyposlib',
+                 'tool_commit': 'eac849ed9d3162cf11017715f771458b1d4e60b5', 'scope': 'projects/a',
                  'commit': git('rev-parse', 'HEAD'), 'branch': 'trunk', 'dirty': 'true',
                  'remote.origin': 'https://forge.example/some/one.git',
                  'remote.mirror': 'git@forge.example:some/one.git'},
                 seal.claims_of(plan, 'the hash'))
 
     def test_claims_outside_a_repository_git_reads_say_what_is_known(self):
-        with KeptScope() as kept:
+        with KeptScope() as kept, tempfile.TemporaryDirectory() as tool, \
+                unittest.mock.patch.object(seal, 'TOOL_DIRECTORY', Path(tool)):
             plan = seal.plan(kept.scope / 'trial', kept.scope / 'archives/trial', LEDGER)
             self.assertEqual({'plan': 'the hash', 'tool': 'pyposlib', 'scope': 'projects/a'},
                              seal.claims_of(plan, 'the hash'))
