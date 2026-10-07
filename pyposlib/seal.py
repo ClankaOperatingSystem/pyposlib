@@ -106,10 +106,7 @@ def fetch(uri, start=None, keeper_for=None):
         for archive in ai.roots(scope):
             if bool(ai.kept(archive)) != kept:
                 continue
-            try:
-                cids = ai.fold_cids(archive) if kept else cid.cid_tree(archive)
-            except cid.ShardingUnsupported:
-                continue
+            cids = ai.fold_cids(archive) if kept else cid.cid_tree(archive)
             for base in sorted(b for b, found in cids.items() if found == wanted):
                 yield archive, '/'.join(part for part in (base, path) if part not in ('', '.'))
 
@@ -212,11 +209,8 @@ def plan(source, destination, ledger_id=None):
         actual = ai.kept_entries(archive, known)
     else:
         actual = ai.inventory(archive)
-        try:
-            cids = cid.cid_tree(archive) if archive.exists() else {}
-        except cid.ShardingUnsupported:
-            cids = None
-        compared = {n: dict(e, cid=cids.get(n)) if cids is not None and 'cid' in known.get(n, {}) else e
+        cids = cid.cid_tree(archive) if archive.exists() else {}
+        compared = {n: dict(e, cid=cids.get(n)) if 'cid' in known.get(n, {}) else e
                     for n, e in actual.items()}
         diff = ai.differences(known, compared)
         if diff['missing'] or diff['changed']:
@@ -363,10 +357,7 @@ def convert(root):
         if reason:
             skipped.append(dict(archive=str(archive), reason=reason))
             continue
-        try:
-            cids = cid.cid_tree(archive)
-        except cid.ShardingUnsupported as unsupported:
-            raise Refused('sharding-unsupported', str(unsupported))
+        cids = cid.cid_tree(archive)
         actual = {n: dict(e, cid=cids.get(n)) for n, e in ai.inventory(archive).items()}
         diff = ai.differences(entries, actual)
         if diff['missing'] or diff['changed'] or diff['new'] or recorded != cids['.']:
@@ -675,10 +666,7 @@ def keep(root, keeper_for=None, claims=None):
             raise Refused('kept', f'A keeper keeps a ledger of schema 3; convert this one first: {archive}')
         if files[0].parent.parent.parent != archive.parent:
             raise Refused('ledger', f'A kept archive\'s ledger lies beside it, not inside: {archive}')
-        try:
-            cids = cid.cid_tree(archive)
-        except cid.ShardingUnsupported as unsupported:
-            raise Refused('sharding-unsupported', str(unsupported))
+        cids = cid.cid_tree(archive)
         actual = {n: dict(e, cid=cids.get(n)) for n, e in ai.inventory(archive).items()}
         diff = ai.differences(entries, actual)
         if (diff['missing'] or diff['changed'] or diff['new'] or recorded != cids['.']
@@ -757,10 +745,7 @@ def recall(root, keeper_for=None):
             raise Refused('root', f'The ledger does not fold to its recorded root: {archive}')
         actual = {}
         if archive.exists():
-            try:
-                cids = cid.cid_tree(archive)
-            except cid.ShardingUnsupported as unsupported:
-                raise Refused('sharding-unsupported', str(unsupported))
+            cids = cid.cid_tree(archive)
             actual = {n: dict(e, cid=cids.get(n)) for n, e in ai.inventory(archive).items()}
         diff = ai.differences(entries, actual)
         if diff['changed'] or diff['new']:

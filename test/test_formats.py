@@ -57,11 +57,8 @@ class Formats(unittest.TestCase):
                 limits = dict(chunk_size=params.get('chunk', cid.CHUNK_SIZE),
                               max_links=params.get('links', cid.FILE_MAX_LINKS))
                 path = root / fixture['entry']
-                try:
-                    got = (cid.cid_directory if path.is_dir() else cid.cid_file)(path, **limits)
-                except cid.ShardingUnsupported:
-                    got = 'sharding-unsupported'
-                self.assertEqual(fixture.get('cid') or fixture['error'], got)
+                got = (cid.cid_directory if path.is_dir() else cid.cid_file)(path, **limits)
+                self.assertEqual(fixture['cid'], got)
 
     def test_an_inventory_gives_the_cids_of_its_tree(self):
         """Every fixture in fixtures/inventory/: the tree on disk and the
@@ -83,6 +80,31 @@ class Formats(unittest.TestCase):
                     elif not any(not n.name.startswith('.') for n in file.iterdir()):
                         empty.append(rel.as_posix())
                 self.assertEqual(fixture['cids'], cid.cid_inventory(entries, empty, **limits))
+
+    def test_murmur3_x64_64_is_the_multihashs(self):
+        """The first 64 bits of MurmurHash3 x64 128, big-endian, on the usual vectors."""
+        for data, digest in ((b'', '0000000000000000'), (b'hello', 'cbd8a7b341bd9b02'),
+                             (b'The quick brown fox jumps over the lazy dog', 'e34bbc7bbc071b6c')):
+            self.assertEqual(digest, cid.murmur3_x64_64(data).hex())
+
+    def test_an_inventory_shards_as_the_tree_on_disk_does(self):
+        """A sharded directory's CIDs from an inventory are those of the tree on
+        disk, the recorded root among them, and its blocks include every
+        shard's, so a keeper can hold what the root names."""
+        fixture = dict(fixtures('cid'))['sharded-inside-plain']
+        with Built(fixture) as root:
+            path = root / fixture['entry']
+            tree = cid.cid_tree(path)
+            self.assertEqual(fixture['cid'], tree['.'])
+            entries = {f.relative_to(path).as_posix(): (cid.cid_file(f), f.stat().st_size)
+                       for f in path.rglob('*') if f.is_file()}
+            blocks = {}
+            self.assertEqual(tree, cid.cid_inventory(entries, blocks=blocks))
+            directories = {c for p, c in tree.items() if p in ('.', 'big', 'big/sub')}
+            self.assertTrue(directories < set(blocks))
+            self.assertGreater(len(blocks), len(directories))
+            for c, block in blocks.items():
+                self.assertEqual(c, cid.text(cid.binary_cid(cid.DAG_PB, block)))
 
     def test_a_cid_decodes_to_the_bytes_it_encodes(self):
         binary = cid.leaf(b'hello')[0]
