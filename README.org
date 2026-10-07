@@ -17,6 +17,10 @@ The package is =pyposlib/=:
   =doc/remote-archive-protocol.txt= specifies: the client's port and its
   HTTP wire, and the keeping side, which verifies what it is sent and is
   what a server wraps around its storage.
+- =signin.py= :: signing in to a keeper that takes OAuth 2.0 tokens, as
+  section 8 of poslib's =doc/remote-archive-protocol.txt= specifies: the
+  authorization code flow with PKCE to a loopback address, when a person
+  asks for it; the token kept in one file, which poslib reads too.
 - =tree.py= :: a node's configuration, in =.clanka/= or =.pos/=, as
   poslib's =doc/pos-directory.txt= specifies: read and checked, with its
   defaults filled in; the plan of what a tree needs, which changes
