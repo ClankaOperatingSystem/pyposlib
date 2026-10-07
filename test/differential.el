@@ -31,7 +31,6 @@
              (pos-cid-file-max-links (or .links pos-cid-file-max-links)))
          (condition-case nil
              (if (file-directory-p .path) (pos-cid-directory .path) (pos-cid-file .path))
-           (pos-cid-sharding-unsupported "sharding-unsupported")
            (error "error"))))
       ("check"
        (condition-case err

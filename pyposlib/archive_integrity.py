@@ -651,11 +651,8 @@ def report(root, ask=None, keeper_for=None):
             diff = dict(missing=[], changed=[], new=[])
         else:
             actual = inventory(archive)
-            try:
-                cids = cid.cid_tree(archive)
-            except cid.ShardingUnsupported:
-                cids = None
-            compared = {n: dict(e, cid=cids.get(n)) if cids is not None and 'cid' in known.get(n, {}) else e
+            cids = cid.cid_tree(archive)
+            compared = {n: dict(e, cid=cids.get(n)) if 'cid' in known.get(n, {}) else e
                         for n, e in actual.items()}
             diff = differences(known, compared)
         writable = [] if keeper else [n for n in actual if regular(archive / n).st_mode & 0o222]

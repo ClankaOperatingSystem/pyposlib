@@ -17,8 +17,8 @@
 
 The CID ipfs add gives under the unixfs-v1-2025 import profile: CIDv1,
 sha2-256, raw leaves, 1 MiB chunks, a balanced layout of 1024 links a node.
-Hidden entries are left out; names are hashed as stored. A directory
-IPFS would shard raises ShardingUnsupported rather than get a wrong CID.
+Hidden entries are left out; names are hashed as stored. A directory whose
+node would exceed 256 KiB is a HAMT shard, as IPFS makes it.
 """
 import base64
 import hashlib
@@ -28,14 +28,12 @@ import stat
 CHUNK_SIZE = 1048576
 FILE_MAX_LINKS = 1024
 SHARDING_THRESHOLD = 262144
+HAMT_FANOUT = 256
+MURMUR3_X64_64 = 0x22
 
 RAW = 0x55
 DAG_PB = 0x70
 DAG_JSON = 0x0129
-
-
-class ShardingUnsupported(ValueError):
-    """A directory needs HAMT sharding, which is not implemented."""
 
 
 def varint(n):
@@ -75,6 +73,93 @@ def pb_block(links, data):
 def pb_node(links, data):
     block = pb_block(links, data)
     return binary_cid(DAG_PB, block), len(block) + sum(t for _, _, t in links)
+
+
+def murmur3_x64_64(data):
+    """The first 64 bits of MurmurHash3 x64 128 of data, seed 0, big-endian:
+    the multihash murmur3-x64-64, by which a HAMT places a name."""
+    mask = (1 << 64) - 1
+
+    def rotl(x, r):
+        return ((x << r) | (x >> (64 - r))) & mask
+
+    def fmix(k):
+        k ^= k >> 33
+        k = (k * 0xff51afd7ed558ccd) & mask
+        k ^= k >> 33
+        k = (k * 0xc4ceb9fe1a85ec53) & mask
+        return k ^ (k >> 33)
+
+    c1, c2 = 0x87c37b91114253d5, 0x4cf5ad432745937f
+    h1 = h2 = 0
+    n = len(data)
+    for i in range(0, n - n % 16, 16):
+        k1 = int.from_bytes(data[i:i + 8], 'little')
+        k2 = int.from_bytes(data[i + 8:i + 16], 'little')
+        h1 ^= (rotl((k1 * c1) & mask, 31) * c2) & mask
+        h1 = (rotl(h1, 27) + h2) & mask
+        h1 = (h1 * 5 + 0x52dce729) & mask
+        h2 ^= (rotl((k2 * c2) & mask, 33) * c1) & mask
+        h2 = (rotl(h2, 31) + h1) & mask
+        h2 = (h2 * 5 + 0x38495ab5) & mask
+    tail = data[n - n % 16:]
+    if len(tail) > 8:
+        k2 = int.from_bytes(tail[8:], 'little')
+        h2 ^= (rotl((k2 * c2) & mask, 33) * c1) & mask
+    if tail:
+        k1 = int.from_bytes(tail[:8], 'little')
+        h1 ^= (rotl((k1 * c1) & mask, 31) * c2) & mask
+    h1 ^= n
+    h2 ^= n
+    h1 = (h1 + h2) & mask
+    h2 = (h2 + h1) & mask
+    h1 = fmix(h1)
+    h2 = fmix(h2)
+    h1 = (h1 + h2) & mask
+    return h1.to_bytes(8, 'big')
+
+
+def shard(entries, level, blocks):
+    """The HAMT shard node over entries, (hash, (cid, name, tsize)), placed
+    by byte level of their hashes: a lone entry in a slot is linked under
+    the slot's two hex digits and its name, several under the digits alone
+    as a sub-shard placed by the next byte. Each shard's block is put in
+    blocks by its CID when blocks is given."""
+    slots = {}
+    for digest, link in entries:
+        slots.setdefault(digest[level], []).append((digest, link))
+    bitfield = bytearray(HAMT_FANOUT // 8)
+    links = []
+    for index in sorted(slots):
+        bitfield[-1 - index // 8] |= 1 << (index % 8)
+        prefix = b'%02X' % index
+        if len(slots[index]) == 1:
+            c, name, t = slots[index][0][1]
+            links.append((c, prefix + name, t))
+        else:
+            c, t = shard(slots[index], level + 1, blocks)
+            links.append((c, prefix, t))
+    data = (varint_field(1, 5) + bytes_field(2, bytes(bitfield).lstrip(b'\0'))
+            + varint_field(5, MURMUR3_X64_64) + varint_field(6, HAMT_FANOUT))
+    node = pb_node(links, data)
+    if blocks is not None:
+        blocks[text(node[0])] = pb_block(links, data)
+    return node
+
+
+def directory_node(links, blocks=None):
+    """The node of a directory linking links, (cid, name, tsize): a plain
+    directory node, or a HAMT shard where that node would exceed
+    SHARDING_THRESHOLD bytes. Its blocks are put in blocks by CID when
+    blocks is given."""
+    data = varint_field(1, 1)
+    block = pb_block(links, data)
+    if len(block) > SHARDING_THRESHOLD:
+        return shard([(murmur3_x64_64(name), link) for link in links for name in (link[1],)], 0, blocks)
+    node = pb_node(links, data)
+    if blocks is not None:
+        blocks[text(node[0])] = block
+    return node
 
 
 def leaf(data):
@@ -130,11 +215,7 @@ def directory(path, rel, visit, chunk_size, max_links):
         else:
             raise ValueError(f'Not a regular file: {os.fsdecode(child)}')
         links.append((node[0], name, node[1]))
-    data = varint_field(1, 1)
-    size = len(pb_block(links, data))
-    if size > SHARDING_THRESHOLD:
-        raise ShardingUnsupported(f'{os.fsdecode(path)}: directory block of {size} bytes')
-    node = pb_node(links, data)
+    node = directory_node(links)
     visit(rel or '.', node)
     return node
 
@@ -265,9 +346,9 @@ def cid_inventory(entries, empty=(), chunk_size=CHUNK_SIZE, max_links=FILE_MAX_L
     Directories are derived from the paths as cid_tree finds them on disk;
     one that holds nothing has no file to derive it from and is listed in
     empty. A hidden component is refused since IPFS would leave it out.
-    {path: cid}, files as given, the root as '.'. Raises ShardingUnsupported
-    as cid_directory does. Each directory's block is put in blocks, by its
-    CID, when blocks is given."""
+    {path: cid}, files as given, the root as '.'. Each directory's blocks,
+    the shards of one IPFS shards among them, are put in blocks, by CID,
+    when blocks is given."""
     tree = {}
     for path, (given, size) in entries.items():
         parts = path.split('/')
@@ -306,14 +387,8 @@ def cid_inventory(entries, empty=(), chunk_size=CHUNK_SIZE, max_links=FILE_MAX_L
                 c, t, given = child
                 cids[path] = given
             links.append((c, name.encode('utf-8'), t))
-        data = varint_field(1, 1)
-        size = len(pb_block(links, data))
-        if size > SHARDING_THRESHOLD:
-            raise ShardingUnsupported(f'{rel or "."}: directory block of {size} bytes')
-        c, t = pb_node(links, data)
+        c, t = directory_node(links, blocks)
         cids[rel or '.'] = text(c)
-        if blocks is not None:
-            blocks[text(c)] = pb_block(links, data)
         return c, t
 
     walk(tree, '')

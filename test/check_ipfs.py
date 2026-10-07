@@ -17,7 +17,7 @@
 
 A fresh repository with the unixfs-v1-2025 profile, and ipfs add --only-hash,
 which stores and announces nothing. kubo must give each fixture's recorded CID,
-and so must we; for one we refuse, kubo must give the CID the fixture records.
+and so must we.
 """
 import os
 from pathlib import Path
@@ -93,16 +93,12 @@ def main(program):
                 theirs = kubo(program, repo, 'add', '--quieter', '--only-hash', *flags, str(path))
                 limits = dict(chunk_size=params.get('chunk', cid.CHUNK_SIZE),
                               max_links=params.get('links', cid.FILE_MAX_LINKS))
-                try:
-                    ours = (cid.cid_directory if path.is_dir() else cid.cid_file)(path, **limits)
-                except cid.ShardingUnsupported:
-                    ours = 'sharding-unsupported'
-                if theirs == (fixture.get('cid') or fixture['ipfs']) and \
-                        ours == (fixture.get('cid') or fixture['error']):
+                ours = (cid.cid_directory if path.is_dir() else cid.cid_file)(path, **limits)
+                if theirs == fixture['cid'] and ours == fixture['cid']:
                     print(f'ok    {name}')
                 else:
                     failed += 1
-                    print(f"FAIL  {name}: recorded {fixture.get('cid') or fixture['ipfs']}, "
+                    print(f"FAIL  {name}: recorded {fixture['cid']}, "
                           f'kubo {theirs}, ours {ours}')
             finally:
                 writable(root)
