@@ -227,7 +227,8 @@ def _archives(entries, children, warnings):
     archives = []
     for index, entry in enumerate(entries):
         archive = _mapping(entry, 'An archive', [('scope', 'string', True), ('kept', 'string', True),
-                                                 ('ledger', 'string', False), ('url', 'string', False)],
+                                                 ('ledger', 'string', False), ('url', 'string', False),
+                                                 ('sweep', 'string', False), ('path', 'string', False)],
                            warnings, f'archives[{index}]')
         scope, kept = archive['scope'], archive['kept']
         if scope != '.':
@@ -239,12 +240,18 @@ def _archives(entries, children, warnings):
         if 'ledger' in archive and not _UUID.fullmatch(archive['ledger']):
             raise Refused('bad-value', f"Not a ledger's id: {archive['ledger']}")
         ledger = {'ledger': archive['ledger']} if 'ledger' in archive else {}
+        if 'sweep' in archive and archive['sweep'] not in ('weekly', 'sealed'):
+            raise Refused('bad-value', f"Done items are swept weekly or sealed, not {archive['sweep']}")
+        if 'path' in archive and archive.get('sweep') != 'weekly':
+            raise Refused('bad-value', f'Only a weekly sweep has a path: {scope}')
+        sweep = {**({'sweep': archive['sweep']} if 'sweep' in archive else {}),
+                 **({'path': _location(archive, 'path')} if 'path' in archive else {})}
         if kept != 'remote':
             if 'url' in archive:
                 raise Refused('bad-value', f'Only a remote archive has a url: {scope}')
-            archives.append({'scope': scope, 'kept': kept, **ledger})
+            archives.append({'scope': scope, 'kept': kept, **ledger, **sweep})
         elif 'url' in archive:
-            archives.append({'scope': scope, 'kept': kept, **ledger, 'url': archive['url']})
+            archives.append({'scope': scope, 'kept': kept, **ledger, 'url': archive['url'], **sweep})
         else:
             raise Refused('missing-key', 'A remote archive lacks url')
     _distinct([archive['scope'] for archive in archives], "An archive's scope")
