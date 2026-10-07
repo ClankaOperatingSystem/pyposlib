@@ -28,7 +28,7 @@ os.environ['POS_ARCHIVE_OFFLINE'] = '1'
 # Nor does a test read or write the tokens a person has kept by signing in.
 os.environ['XDG_CONFIG_HOME'] = tempfile.mkdtemp(prefix='pyposlib-config-')
 os.environ.pop('POS_ARCHIVE_TOKEN', None)
-POSLIB = Path(os.environ.get('POSLIB', HERE.parent / 'poslib'))
+POSLIB = Path(os.environ.get('POSLIB', HERE.parent / '_deps' / 'poslib'))
 FIXTURES = POSLIB / 'fixtures'
 
 
