@@ -54,8 +54,8 @@ and =help=. Exit 0 done or clean, 1 findings, 2 refused.
 
 - =make check=: the tests; poslib's shared fixtures, every one; and, with
   Emacs, poslib itself on random trees, which must give the same bytes.
-  The fixtures come from =POSLIB=, a poslib checkout, else from =poslib/=,
-  cloned and brought to =POSLIB_REF=, default =master=.
+  The fixtures come from =POSLIB=, a poslib checkout, else from
+  =_deps/poslib=, cloned and brought to =POSLIB_REF=, default =master=.
 - =make check-ipfs IPFS=path/to/ipfs=: the CID fixtures against kubo,
   offline, with the unixfs-v1-2025 profile.
 
