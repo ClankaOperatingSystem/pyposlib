@@ -562,14 +562,9 @@ class _Plan:
 
     def claude_link(self, directory, wanted):
         """Plan the .claude/skills link of the repository at directory,
-        made only if wanted, which says the repository has skills."""
+        made only if wanted and absent. Existing layouts are left alone."""
         link = os.path.join(directory, '.claude', 'skills')
-        if os.path.islink(link):
-            if os.readlink(link).removesuffix('/') != '../.agents/skills':
-                self.find('claude-skills', self.rel(link), 'a link elsewhere')
-        elif os.path.exists(link):
-            self.find('claude-skills', self.rel(link), 'not a link')
-        elif wanted:
+        if wanted and _skill_path_open(directory, '.claude') and not os.path.lexists(link):
             self.exclude(directory, '.claude/skills')
             self.act('link', path=self.rel(link), target='../.agents/skills')
 
@@ -578,6 +573,11 @@ class _Plan:
         containers are the linkable skills of the repositories above it,
         nearest first."""
         directory = node.directory
+        if not _skill_path_open(directory, '.agents/skills'):
+            # Preserve this layout while still visiting its descendants.
+            for _, child in node.children:
+                self.links(child, containers)
+            return
         skills = _skills(directory)
         entries = _entries(directory)
         made = [name for name in entries if self.tool_link(directory, name)]
@@ -660,7 +660,19 @@ def _skills(directory):
 def _entries(directory):
     """The names in the skills directory of the repository at directory."""
     skills = _skills(directory)
-    return sorted(os.listdir(skills)) if os.path.isdir(skills) else []
+    return (sorted(os.listdir(skills))
+            if _skill_path_open(directory, '.agents/skills') and os.path.isdir(skills) else [])
+
+
+def _skill_path_open(directory, path):
+    """Whether path can hold managed skills without replacing content.
+    Existing components must be ordinary directories, never symlinks."""
+    at = directory
+    for part in path.split('/'):
+        at = os.path.join(at, part)
+        if os.path.islink(at) or (os.path.lexists(at) and not os.path.isdir(at)):
+            return False
+    return True
 
 
 def _linkable(directory):

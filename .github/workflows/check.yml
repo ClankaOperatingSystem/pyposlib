@@ -8,6 +8,9 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      # Test against the matching skill-layout specification and implementation.
+      POSLIB_REF: eac849ed9d3162cf11017715f771458b1d4e60b5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
