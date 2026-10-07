@@ -423,14 +423,42 @@ def rewrite_source(plan):
             raise Refused('plan', f'Item changed since review: {file}')
 
 
+# Where this library is installed: the parent of its package. Its COMMIT
+# file, or the repository git reads there, says which commit the tool is at.
+TOOL_DIRECTORY = Path(__file__).resolve().parent.parent
+
+
+def tool_commit(directory=None):
+    """The commit the tool installed in DIRECTORY (TOOL_DIRECTORY by default)
+    is at, or None: read from the COMMIT file an image writes beside the
+    package, else asked of git where DIRECTORY is a repository."""
+    directory = Path(directory or TOOL_DIRECTORY)
+    file = directory / 'COMMIT'
+    if file.is_file():
+        commit = file.read_text().strip()
+        return commit if re.fullmatch(r'[0-9a-f]+', commit) else None
+    if not (directory / '.git').is_dir():
+        return None
+    try:
+        done = subprocess.run(['git', '-C', str(directory), 'rev-parse', '--verify', '-q', 'HEAD'],
+                              capture_output=True, text=True, timeout=60,
+                              env=dict(os.environ, GIT_CEILING_DIRECTORIES=str(directory.parent)))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    commit = done.stdout.rstrip('\n')
+    return commit if done.returncode == 0 and commit else None
+
+
 def claims_of(plan, expected):
     """What this client says of where a seal came from, for its keeper to
-    record: the plan's hash, where there was a plan, the tool, and of the
-    scope's repository, where there is one and git reads it, the scope's
-    path, the commit and branch it
-    is at, whether its working tree is dirty, and each remote's URL less any
+    record: the plan's hash, where there was a plan, the tool and the commit
+    it is at, where it knows it, and of the scope's repository, where there
+    is one and git reads it, the scope's path, the commit and branch it is
+    at, whether its working tree is dirty, and each remote's URL less any
     user and password. Strings by name."""
     claims = dict(tool='pyposlib', **(dict(plan=expected) if expected else {}))
+    if commit := tool_commit():
+        claims['tool_commit'] = commit
     scope = Path(plan['archive']).parent
     root = next((part for part in [scope, *scope.parents] if (part / '.git').exists()), None)
     if root is None:
