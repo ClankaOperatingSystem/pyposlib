@@ -22,13 +22,15 @@ from it, by a keeper reached at a URL. Four operations pass between them.
 - HttpRemoteArchive: that port over HTTP, the protocol's wire.
 - Keeper: the keeping side, in memory: it verifies what it is sent as
   the protocol requires, and is what a server wraps around its storage.
+- named, following: the ledger a run of events names, and the events a
+  client sends after one that names none.
 - handle: the wire's keeping side, one request to one response.
 - server: a keeper behind handle on a local port, for trying a client.
 """
 import http.server
 import json
 import re
-from typing import Mapping, Protocol
+from typing import Mapping, Protocol, Sequence
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -56,16 +58,50 @@ class RemoteArchive(Protocol):
         ...
 
     def append(self, name: str, event: bytes, files: Mapping[str, bytes],
-               claims: Mapping[str, str]) -> dict:
+               claims: Mapping[str, str], following: Sequence[tuple[str, bytes]] = ()) -> dict:
         """Append the event of bytes event, the ledger file name names, with
         files by their CIDs and the client's claims; the description after.
-        The same event at the same number again changes nothing."""
+        following is the events after it, each (name, bytes) in order, by
+        which an event that names no ledger is known for this ledger's
+        (following). The same event at the same number again changes nothing."""
         ...
 
     def read(self, cid_text: str, path: str = '') -> bytes:
         """The bytes of the block cid_text, or of the file at path beneath
         it when it is a directory."""
         ...
+
+
+# ----------------------------------------------------------------- identity
+
+def named(events):
+    """The ledger_id events name, each (name, bytes) in order: that of the
+    last of them that has one, or None. In a valid chain every event that
+    has one has the same, and none follows one that has."""
+    for _, data in reversed(events):
+        found = json.loads(data).get('ledger_id')
+        if found is not None:
+            return found
+    return None
+
+
+def following(events, number):
+    """What a client sends after event number of events, a ledger's (name,
+    bytes) in order, so that a keeper can tell whose the event is.
+
+    An event's ledger is named by the event or by one before it. A ledger
+    begun before events carried a ledger_id has first events that name
+    none, and for one of those the client sends the events after it, up to
+    and including the first that does name the ledger: each event's
+    previous is the hash of the one before, so that event vouches for all
+    before it. For any other event this is empty; and it is empty where no
+    event names a ledger, since nothing then vouches."""
+    if named(events[:number]) is not None:
+        return []
+    for index in range(number, len(events)):
+        if named(events[index:index + 1]) is not None:
+            return list(events[number:index + 1])
+    return []
 
 
 # ------------------------------------------------------------------ keeping
@@ -78,6 +114,11 @@ class Keeper:
     a file's bytes must hash to the CID they are sent under, and once
     the ledger is of schema 3 its fold must give the event's root with
     every enrolled file held.
+
+    ledger_id is the ledger it is to keep, and it takes no event of
+    another (whose). Given none it keeps whichever ledger it is first
+    sent an event of, and is that ledger's from the first event that
+    names one.
 
     Alone it keeps everything in memory. A server gives it what it
     already holds: events, the ledger's (name, bytes) in order; blocks,
@@ -115,15 +156,42 @@ class Keeper:
         head, root = None, None
         if self.events:
             _, head, root, _ = self._state(self.events)
-        return dict(protocol=VERSION, ledger_id=self.ledger_id, head=head, events=len(self.events),
-                    root=root, erased=sorted(self.erased))
+        # A ledger with no event yet has no id to describe, whichever the
+        # keeper was told to keep.
+        return dict(protocol=VERSION, ledger_id=self.ledger_id if self.events else None, head=head,
+                    events=len(self.events), root=root, erased=sorted(self.erased))
 
     def event(self, number):
         if not 1 <= number <= len(self.events):
             raise Refused('absent', f'No event {number}')
         return self.events[number - 1][1]
 
-    def append(self, name, event, files, claims):
+    def whose(self, name, event, following):
+        """Refuse, as identity, an event that is not this keeper's ledger's.
+
+        The ledger an event belongs to is the one named by the chain it
+        ends: the events held, then the event. Where that chain names
+        none, the event is one of the first of a ledger begun before
+        events carried a ledger_id, and nothing in it says whose it is.
+        It is then taken only with following, the events after it up to
+        one that names this ledger, which must be valid next events of
+        the same chain: each event's previous is the hash of the one
+        before, so the event that names the ledger could follow no other
+        first events than these. following is verified and not kept; its
+        events are appended when they are sent in their turn.
+
+        A keeper told no ledger has none to hold an event to."""
+        if self.ledger_id is None:
+            return
+        chain = [*self.events, (name, event)]
+        if named(chain) is None and following:
+            chain = [*chain, *following]
+            ai.chain(chain)
+        if named(chain) != self.ledger_id:
+            raise Refused('identity', 'The event is not this ledger\'s: it names another, or it names '
+                                      'none and no event sent after it names this one')
+
+    def append(self, name, event, files, claims, following=()):
         match = ai.EVENT_NAME.fullmatch(name)
         if not match:
             raise Refused('sequence', f'Not an event\'s name: {name}')
@@ -139,8 +207,7 @@ class Keeper:
                 raise Refused('entry', f'Bytes are not those of the CID they were sent under: {given}')
         entries, head, root, empty = self._state([*self.events, (name, event)])
         value = json.loads(event)
-        if self.ledger_id not in (None, value.get('ledger_id')):
-            raise Refused('identity', 'The event is another ledger\'s')
+        self.whose(name, event, list(following))
         # What was kept before this event: everything, if the event before
         # was of schema 3; nothing, if the ledger is only now being kept.
         kept = bool(self.events) and ai.is_event_cid(ai.EVENT_NAME.fullmatch(self.events[-1][0])[2])
@@ -264,7 +331,13 @@ def handle(keeper, method, path, headers, body):
             parts = parts_of(body or b'', kinds[0] if kinds else None)
             names = [name for name, _ in parts]
             if names[:3] != ['name', 'event', 'claims'] or len(set(names)) != len(names):
-                raise Refused('request', 'Expected the parts name, event and claims, then files by CID')
+                raise Refused('request', 'Expected the parts name, event and claims, '
+                                         'then later events by name and files by CID')
+            # After claims a part is a later event, named as a ledger file
+            # is, or a file, named by its CID; the two cannot be confused.
+            later = [part for part in parts[3:] if ai.EVENT_NAME.fullmatch(part[0])]
+            if later != parts[3:3 + len(later)]:
+                raise Refused('request', 'Later events come before the files')
             try:
                 claims = json.loads(parts[2][1])
             except ValueError:
@@ -272,7 +345,7 @@ def handle(keeper, method, path, headers, body):
             if not isinstance(claims, dict) or not all(isinstance(v, str) for v in claims.values()):
                 raise Refused('request', 'claims is an object of strings')
             before = keeper.describe()['events']
-            after = keeper.append(parts[0][1].decode(), parts[1][1], dict(parts[3:]), claims)
+            after = keeper.append(parts[0][1].decode(), parts[1][1], dict(parts[3 + len(later):]), claims, later)
             return (201 if after['events'] > before else 200), JSON, encoded(after)
         raise Refused('absent', f'Nothing answers {method} {path}')
     except Refused as refused:
@@ -338,9 +411,10 @@ class HttpRemoteArchive:
     def event(self, number):
         return self.call('GET', f'/events/{number}')
 
-    def append(self, name, event, files, claims):
+    def append(self, name, event, files, claims, following=()):
         body, content_type = multipart([('name', name.encode()), ('event', event),
-                                        ('claims', encoded(dict(claims))), *sorted(files.items())])
+                                        ('claims', encoded(dict(claims))), *following,
+                                        *sorted(files.items())])
         return json.loads(self.call('POST', '/events', body, content_type))
 
     def read(self, cid_text, path=''):
