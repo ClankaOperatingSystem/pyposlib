@@ -593,9 +593,65 @@ class Trees(unittest.TestCase):
         self.settle(root)
         self.assertEqual(os.readlink(link), elsewhere)
 
-    def test_skills_beneath_claude_are_found(self):
+    def test_skills_beneath_claude_are_preserved(self):
         root = repository(self.path('root'), {'.claude/skills/old/SKILL.md': '---\nname: old\n---\n'})
-        self.assertEqual(summary(self.plan(root)), ['claude-skills .claude/skills'])
+        self.assertEqual(summary(self.settle(root)), [])
+        self.assertFalse(Path(root, '.claude/skills').is_symlink())
+        self.assertEqual(status(root), '')
+
+    def test_mounted_skill_layouts_are_preserved_without_stopping_descendants(self):
+        for path in ('.claude', '.claude/skills', '.agents', '.agents/skills'):
+            for kind in ('file', 'link', 'dangling'):
+                with self.subTest(path=path, kind=kind):
+                    case = self.path(path.replace('/', '-') + '-' + kind)
+                    grand = repository(os.path.join(case, 'origins/grand'), {'README': 'grand\n'})
+                    origin = repository(os.path.join(case, 'origins/child'),
+                                        config(child('grand', grand)))
+                    at = Path(origin, path)
+                    at.parent.mkdir(parents=True, exist_ok=True)
+                    if kind == 'file':
+                        at.write_text('existing\n')
+                    else:
+                        target = Path(origin, 'foreign')
+                        if kind == 'link':
+                            write(target, 'skills/private/SKILL.md', 'private\n')
+                        at.symlink_to(target)
+                    commit(origin)
+                    root = repository(os.path.join(case, 'root'),
+                                      {**config(child('child', origin, 'skills-up: true')),
+                                       **skill('inherited')})
+                    self.assertEqual(summary(self.settle(root)), [])
+                    mounted = Path(root, 'child')
+                    self.assertEqual(status(mounted), '')
+                    self.assertEqual(status(mounted / 'grand'), '')
+                    self.assertEqual(names(mounted / 'grand'), ['inherited'])
+                    self.assertEqual(names(root), ['inherited'])
+                    if path.startswith('.agents'):
+                        self.assertFalse((mounted / '.claude').exists())
+                    else:
+                        self.assertEqual(names(mounted), ['inherited'])
+                    if kind == 'file':
+                        self.assertEqual((mounted / path).read_text(), 'existing\n')
+                    else:
+                        self.assertEqual(os.readlink(mounted / path), os.readlink(at))
+                    self.assertEqual(summary(self.plan(root)), [])
+
+    def test_loose_claude_skill_survives_mounting_and_other_skills_propagate(self):
+        contents = '# Generate a PDF\nUse tools/generate_pdf.py.\n'
+        origin = repository(self.path('origins/child'),
+                            {'.claude/skills/generate-pdf.md': contents,
+                             '.agents/skills/inherited': 'local file owns this name\n'})
+        root = repository(self.path('root'),
+                          {**config(child('child', origin)), **skill('inherited'),
+                           **skill('another')})
+        self.assertEqual(summary(self.settle(root)), [])
+        mounted = Path(root, 'child')
+        self.assertEqual((mounted / '.claude/skills/generate-pdf.md').read_text(), contents)
+        self.assertFalse((mounted / '.claude/skills').is_symlink())
+        self.assertEqual((mounted / '.agents/skills/inherited').read_text(),
+                         'local file owns this name\n')
+        self.assertTrue((mounted / '.agents/skills/another').is_symlink())
+        self.assertEqual(status(mounted), '')
 
 
 if __name__ == '__main__':
