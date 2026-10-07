@@ -622,7 +622,10 @@ def keep(root, keeper_for=None, claims=None):
     enrolled. A keeper that holds earlier events is taken to hold their
     files; if it refuses the first schema 3 event for want of them, that
     event is sent again with every file enrolled before it, since it is where
-    a keeper requires them. Once the keeper holds the ledger's head and its root, the archive
+    a keeper requires them. A first event that names no ledger, as those of a
+    ledger begun before events carried a ledger_id, is sent with the events
+    after it up to the first that names one, by which the keeper knows whose
+    it is (remote.following). Once the keeper holds the ledger's head and its root, the archive
     is removed from disk. Refused unless every such archive is as its ledger
     says, with a ledger of schema 3 beside it and nothing hidden, before
     anything is sent. Interrupted, it resumes.
@@ -664,6 +667,7 @@ def keep(root, keeper_for=None, claims=None):
         if held > len(files) or (held and described['head'] != files[held - 1].name[9:-5]):
             raise Refused('chain', f'The keeper holds another ledger than this one: {archive}')
         added, first = added_paths(files, entries)
+        events = [(file.name, file.read_bytes()) for file in files]
         sent = {}
 
         def batch_of(paths):
@@ -676,15 +680,16 @@ def keep(root, keeper_for=None, claims=None):
 
         for i in range(held, len(files)):
             batch = batch_of(added[i])
+            vouching = remote.following(events, i + 1)
             try:
-                keeper.append(files[i].name, files[i].read_bytes(), batch, said)
+                keeper.append(*events[i], batch, said, vouching)
             except Refused as refused:
                 # The keeper took an earlier event without its files: they
                 # go with the event at which it requires them.
                 if not (refused.kind == 'entry' and i == first and held):
                     raise
                 batch = batch_of(path for j in range(i + 1) for path in added[j])
-                keeper.append(files[i].name, files[i].read_bytes(), batch, said)
+                keeper.append(*events[i], batch, said, vouching)
             sent.update(batch)
         described = keeper.describe()
         if (described['head'], described['events'], described['root']) != (head, len(files), recorded):

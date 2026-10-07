@@ -79,6 +79,24 @@ class Scope:
         return ai.history(self.scope / 'archives')
 
 
+def begun(unnamed, named=1, ledger_id=LEDGER_ID, text='old'):
+    """The first events of a ledger begun before events carried a
+    ledger_id, as (name, bytes): unnamed schema 1 events that name no
+    ledger, then named that name ledger_id. text tells one such ledger
+    from another."""
+    events, previous = [], None
+    for number in range(1, unnamed + named + 1):
+        data = f'{text} {number}'.encode()
+        value = dict(schema=1, previous=previous,
+                     add={f'{number}.md': dict(mode=0o444, sha256=ai.sha(data), size=len(data))})
+        if number > unnamed:
+            value['ledger_id'] = ledger_id
+        event = ai.encoded(value)
+        previous = ai.sha(event)
+        events.append((f'{number:08}-{previous}.json', event))
+    return events
+
+
 def refusal(operation):
     try:
         operation()
@@ -264,6 +282,128 @@ class Protocol(unittest.TestCase):
             listening.close()
 
 
+OTHER_ID = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+
+
+class Identity(unittest.TestCase):
+    """Whose an event is: a keeper told which ledger it keeps takes no
+    event of another, and an event that names no ledger only with the
+    events after it that show whose it is."""
+
+    def test_events_name_the_ledger_of_the_last_that_has_one(self):
+        events = begun(2, 2)
+        self.assertEqual([None, None, LEDGER_ID, LEDGER_ID],
+                         [remote.named(events[:count]) for count in range(1, 5)])
+        self.assertIsNone(remote.named([]))
+
+    def test_an_event_that_names_no_ledger_is_followed_to_the_first_that_does(self):
+        """Each of the first events that name none is followed by the rest
+        of them and the first that names the ledger, and by no more; an
+        event that names the ledger, or comes after one, by nothing."""
+        events = begun(3, 2)
+        self.assertEqual([events[1:4], events[2:4], events[3:4], [], []],
+                         [remote.following(events, number) for number in range(1, 6)])
+
+    def test_a_ledger_no_event_names_is_followed_by_nothing(self):
+        events = begun(3, 0)
+        self.assertEqual([[], [], []], [remote.following(events, number) for number in range(1, 4)])
+
+    def test_first_events_that_name_no_ledger_are_taken_with_those_after_them(self):
+        """A server makes a keeper for each request, of the ledger it keeps
+        and the events it holds. Each event is appended alone: what follows
+        it is read and not kept."""
+        events, held = begun(3, 2), []
+        for number, (name, event) in enumerate(events, 1):
+            keeper = remote.Keeper(LEDGER_ID, held)
+            described = over(keeper).append(name, event, {}, {}, remote.following(events, number))
+            self.assertEqual((LEDGER_ID, number, name[9:-5]),
+                             (described['ledger_id'], described['events'], described['head']))
+            held = keeper.events
+        self.assertEqual(events, held)
+
+    def test_an_event_that_names_no_ledger_is_refused_unless_this_ledger_follows(self):
+        """Sent alone; followed only by events that name none; followed to
+        an event that names another ledger; followed by another ledger's
+        events, which are no next events of this chain; and followed out of
+        order. Nothing of a refused append is kept."""
+        events = begun(2)
+        another = begun(2, ledger_id=OTHER_ID)
+        elsewhere = begun(2, text='other')
+        self.assertEqual(events[:2], another[:2])
+        cases = [('identity', []),
+                 ('identity', events[1:2]),
+                 ('identity', another[1:]),
+                 ('chain', elsewhere[1:]),
+                 ('sequence', events[2:] + events[1:2])]
+        for kind, following in cases:
+            with self.subTest(kind=kind, following=[name[:8] for name, _ in following]):
+                keeper = remote.Keeper(LEDGER_ID)
+                self.assertEqual(kind, refusal(lambda: over(keeper).append(*events[0], {}, {}, following)))
+                self.assertEqual(([], {}), (keeper.events, keeper.blocks))
+
+    def test_a_held_event_that_names_no_ledger_does_not_admit_another_ledger(self):
+        """A keeper that holds first events of its ledger refuses the next,
+        which names none either, when what follows names another."""
+        events = begun(2)
+        another = begun(2, ledger_id=OTHER_ID)
+        keeper = remote.Keeper(LEDGER_ID)
+        over(keeper).append(*events[0], {}, {}, events[1:])
+        self.assertEqual('identity', refusal(lambda: over(keeper).append(*another[1], {}, {}, another[2:])))
+        self.assertEqual(events[:1], keeper.events)
+
+    def test_an_event_that_names_its_ledger_needs_nothing_after_it(self):
+        """Its own, taken alone; another ledger's, refused whatever follows."""
+        events = begun(0, 2)
+        another = begun(0, 2, ledger_id=OTHER_ID)
+        keeper = remote.Keeper(LEDGER_ID)
+        self.assertEqual('identity', refusal(lambda: over(keeper).append(*another[0], {}, {}, events[1:])))
+        self.assertEqual(1, over(keeper).append(*events[0], {}, {})['events'])
+
+    def test_once_a_ledger_is_named_every_event_names_it(self):
+        events = begun(1)
+        value = dict(schema=1, previous=events[-1][0][9:-5], add={})
+        unnamed = ai.encoded(value)
+        keeper = remote.Keeper(LEDGER_ID)
+        over(keeper).append(*events[0], {}, {}, events[1:])
+        over(keeper).append(*events[1], {}, {})
+        self.assertEqual('identity', refusal(
+            lambda: over(keeper).append(f'00000003-{ai.sha(unnamed)}.json', unnamed, {}, {})))
+
+    def test_a_keeper_told_no_ledger_keeps_the_first_it_is_sent(self):
+        """It takes events that name none as they come, and is the
+        ledger's from the first event that names one."""
+        events = begun(2)
+        keeper = remote.Keeper()
+        client = over(keeper)
+        self.assertEqual([None, None, LEDGER_ID],
+                         [client.append(name, event, {}, {})['ledger_id'] for name, event in events])
+        other = ai.encoded(dict(schema=1, previous=events[-1][0][9:-5], add={}, ledger_id=OTHER_ID))
+        self.assertEqual('identity', refusal(
+            lambda: client.append(f'00000004-{ai.sha(other)}.json', other, {}, {})))
+
+    def test_later_events_travel_after_the_claims_and_before_the_files(self):
+        """The client writes them in order, then the files by CID. A keeper
+        refuses a body with one after a file, or with one twice."""
+        events = begun(2)
+        data = b'old 1'
+        file = (cid.cid_bytes(data), data)
+        sent = []
+
+        def send(method, url, headers, body):
+            sent.append(remote.parts_of(body, headers['Content-Type']))
+            return 201, b'{}'
+        remote.HttpRemoteArchive('https://keeper.example/ledger', 'token', send).append(
+            *events[0], dict([file]), {}, events[1:])
+        self.assertEqual(['name', 'event', 'claims', events[1][0], events[2][0], file[0]],
+                         [name for name, _ in sent[0]])
+        head = [('name', events[0][0].encode()), ('event', events[0][1]), ('claims', b'{}')]
+        for parts in ([*head, file, *events[1:]], [*head, events[1], events[1]]):
+            body, content_type = remote.multipart(parts)
+            status, _, answer = remote.handle(remote.Keeper(LEDGER_ID), 'POST', '/events',
+                                              {'Content-Type': content_type}, body)
+            self.assertEqual((422, 'request'), (status, json.loads(answer)['refused']))
+
+
 @unittest.skipUnless(shutil.which(EMACS), 'needs Emacs')
 class Poslib(unittest.TestCase):
     def test_poslib_s_client_reaches_a_keeper_over_http(self):
@@ -308,7 +448,8 @@ def call(client, spec):
     if operation == 'read':
         return dict(bytes=client.read(spec['cid'], spec.get('path', '')).decode())
     return client.append(spec['name'], spec['event'].encode(),
-                         {k: v.encode() for k, v in spec['files'].items()}, spec['claims'])
+                         {k: v.encode() for k, v in spec['files'].items()}, spec['claims'],
+                         [(later['name'], later['event'].encode()) for later in spec.get('following', [])])
 
 
 class Tapes(unittest.TestCase):
@@ -336,10 +477,11 @@ class Tapes(unittest.TestCase):
                     self.assertEqual({k: exchange[k] for k in ('result', 'refused') if k in exchange}, got)
 
     def test_the_keeper_gives_each_tape_s_responses(self):
-        """Every tape, its requests made in order of one keeper: the status
-        recorded, and the body recorded, or for a refusal its kind."""
+        """Every tape, its requests made in order of one keeper, told the
+        ledger the tape says it keeps, if it says: the status recorded, and
+        the body recorded, or for a refusal its kind."""
         for name, tape in fixtures('remote'):
-            keeper = remote.Keeper()
+            keeper = remote.Keeper(tape.get('ledger_id'))
             for index, exchange in enumerate(tape['exchanges']):
                 with self.subTest(f'{name} {index}'):
                     answered = {}
