@@ -281,7 +281,7 @@ class Trees(unittest.TestCase):
 
     def test_a_repository_that_declares_nothing_needs_nothing(self):
         root = repository(self.path('root'), {'README': 'root\n'})
-        self.assertEqual(self.plan(root), {'pos': 2, 'actions': [], 'findings': []})
+        self.assertEqual(self.plan(root), {'pos': 2, 'actions': [], 'findings': [], 'warnings': []})
 
     def test_only_a_repository_is_planned(self):
         self.assertEqual(refusal(lambda: tree.plan(self.dir)), 'not-a-repository')
@@ -353,16 +353,53 @@ class Trees(unittest.TestCase):
         self.assertEqual(summary(self.plan(root)), [])
 
     def test_a_refused_config_is_found_and_nothing_beneath_planned(self):
-        origin = repository(self.path('origins/child'),
-                            {'.pos/config.yaml': 'pos: 2\nteam: []\n', **skill('c')})
+        """A configuration the reader refuses is a finding, and nothing is
+        planned in that repository or beneath it."""
+        both = 'pos: 2\nprojects: p/\nmethodologies: m/\n'
+        origin = repository(self.path('origins/child'), {'.pos/config.yaml': both, **skill('c')})
         root = repository(self.path('root'), {**config(child('projects/child', origin)), **skill('r')})
         settled = self.settle(root)
         self.assertEqual([line for line in summary(settled) if 'child' in line],
                          ['config-refused projects/child'])
         self.assertEqual(settled['findings'][0]['detail'],
-                         'unknown-key: The file has a key this version does not define: team')
-        write(root, '.pos/config.yaml', 'pos: 2\nteam: []\n')
+                         'bad-value: A node says where its projects belong or its methodologies, not both')
+        write(root, '.pos/config.yaml', both)
         self.assertEqual(summary(self.plan(root)), ['config-refused .'])
+
+    def test_an_unknown_key_is_a_warning_the_plan_carries(self):
+        """A key the reader does not know refuses nothing: the configuration
+        is read without it, and the plan names the node and the key."""
+        root = repository(self.path('root'), {
+            '.pos/config.yaml': 'pos: 2\nprojects: projects/\ncolour: blue\nchildren:\n  - path: work\n',
+            'work/.clanka/config.yml': 'pos: 2\nprojects: projects/\nsweep: weekly\n'})
+        made = self.plan(root)
+        self.assertEqual(made['warnings'], ['.: unknown-key: colour', 'work: unknown-key: sweep'])
+        self.assertEqual(made['findings'], [])
+
+    def test_exclusions_are_inherited_until_a_node_declares_its_own(self):
+        """A node's exclude replaces the default beneath it, by name, glob or
+        path; a local node without one inherits, and one with its own
+        replaces them beneath itself."""
+        root = repository(self.path('root'), {
+            '.clanka/config.yaml': ('pos: 2\nprojects: projects/\nchildren:\n  - path: work\n'
+                                    '  - path: lab\nexclude:\n  - vendor\n  - "tmp*"\n  - stray/deep\n'),
+            'work/.clanka/config.yml': 'pos: 2\nprojects: projects/\n',
+            'lab/.clanka/config.yml': 'pos: 2\nprojects: projects/\nexclude:\n  - attic\n'})
+        for path in ('vendor/lib', 'tmpfiles/lib', 'stray/deep/lib', 'attic/lib',
+                     'work/vendor/lib', 'work/attic/lib', 'lab/vendor/lib', 'lab/attic/lib'):
+            repository(self.path('root/' + path), {'README': 'l\n'})
+        self.assertEqual([line for line in summary(self.plan(root)) if line.startswith('undeclared')],
+                         ['undeclared attic/lib', 'undeclared lab/vendor/lib', 'undeclared work/attic/lib'])
+
+    def test_archive_scopes_are_not_looked_for_in_excluded_directories(self):
+        """An archives directory beneath an excluded one is no scope of the
+        node's; one that is not excluded is, as before."""
+        root = repository(self.path('root'), {
+            '.clanka/config.yaml': 'pos: 2\nprojects: projects/\nexclude:\n  - old\n'})
+        write(root, 'old/archives/evidence', 'old\n')
+        write(root, 'kept/archives/evidence', 'kept\n')
+        action = next(a for a in self.plan(root)['actions'] if a['do'] == 'archive-excludes')
+        self.assertEqual(action['paths'], ['archives', 'kept/archives'])
 
     # Names, kinds and directories
 

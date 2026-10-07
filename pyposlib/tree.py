@@ -38,6 +38,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from fnmatch import fnmatchcase
 
 import yaml
 
@@ -49,9 +50,10 @@ _WORKTREE = re.compile(r'(?:(.+)/)?_worktrees/[^/]+')
 _IMAGE = re.compile(r'[^ \t\n"\'#]+')
 _INTEGER = re.compile(r'0|[1-9][0-9]*')
 _UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
-# Directories not looked into for what is undeclared; nor are hidden
-# ones and those beginning with an underscore.
-_UNWALKED = ('archives', 'attic', 'node_modules')
+# The directories a walk does not enter when no node declares exclude:
+# archives and attics, Node's modules, and names beginning with an
+# underscore or a dot, as doc/pos-directory.txt has it.
+DEFAULT_EXCLUDE = ('archives', 'attic', 'node_modules', '_*', '.*')
 _ARCHIVE_BEGIN = '# BEGIN ClankOS archive excludes\n'
 _ARCHIVE_END = '# END ClankOS archive excludes\n'
 
@@ -132,16 +134,19 @@ def _typed(value, kind):
     return _is_mapping(value), value
 
 
-def _mapping(value, what, keys):
+def _mapping(value, what, keys, warnings, where=None):
     """The mapping value, checked against keys, each (name, kind, required):
-    a key not among them, a value not of its kind and a required key that
-    is absent are each refused. what names the mapping in a refusal."""
+    a value not of its kind and a required key that is absent are each
+    refused. what names the mapping in a refusal. A key not among them is
+    a warning, added to warnings and naming the key after where, the
+    mapping's place in the file; the key is left unread, so a file written
+    for a newer reader is read with that key's default."""
     if not _is_mapping(value):
         raise Refused('not-a-mapping', f'{what} is not a mapping')
     names = [name for name, _, _ in keys]
     for key in value:
         if key not in names:
-            raise Refused('unknown-key', f'{what} has a key this version does not define: {key}')
+            warnings.append(f'unknown-key: {where + "." if where else ""}{key}')
     checked = {}
     for name, kind, required in keys:
         if name in value:
@@ -169,11 +174,12 @@ def _own_scope(path, children, what):
             raise Refused('bad-path', f'{what} is in a child, which declares its own: {path}')
 
 
-def _children(entries):
+def _children(entries, warnings):
     children = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         child = _mapping(entry, 'A child', [('path', 'string', True), ('remote', 'string', False),
-                                            ('branch', 'string', False), ('skills-up', 'boolean', False)])
+                                            ('branch', 'string', False), ('skills-up', 'boolean', False)],
+                         warnings, f'children[{index}]')
         if not _path(child['path']):
             raise Refused('bad-path', f"Not a child's path: {child['path']}")
         # A branch and skills are a repository's: a child with no remote
@@ -190,11 +196,12 @@ def _children(entries):
     return children
 
 
-def _worktrees(entries, children):
+def _worktrees(entries, children, warnings):
     worktrees = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         tree = _mapping(entry, 'A worktree', [('path', 'string', True), ('of', 'string', False),
-                                              ('remote', 'string', False), ('branch', 'string', False)])
+                                              ('remote', 'string', False), ('branch', 'string', False)],
+                        warnings, f'worktrees[{index}]')
         path = tree['path']
         match = _WORKTREE.fullmatch(path) if _path(path) else None
         if not match:
@@ -216,11 +223,12 @@ def _worktrees(entries, children):
     return worktrees
 
 
-def _archives(entries, children):
+def _archives(entries, children, warnings):
     archives = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         archive = _mapping(entry, 'An archive', [('scope', 'string', True), ('kept', 'string', True),
-                                                 ('ledger', 'string', False), ('url', 'string', False)])
+                                                 ('ledger', 'string', False), ('url', 'string', False)],
+                           warnings, f'archives[{index}]')
         scope, kept = archive['scope'], archive['kept']
         if scope != '.':
             if not _path(scope):
@@ -249,11 +257,47 @@ def _archives(entries, children):
     return archives
 
 
+def _exclusions(value):
+    """value, a configuration's exclude sequence, checked: each entry a
+    directory's name or a glob over one, with * for any text, or a path
+    beneath the node when it holds a slash, its final slash dropped. None
+    for None."""
+    if value is None:
+        return None
+    checked = []
+    for entry in value:
+        ok, _ = _typed(entry, 'string')
+        if not ok:
+            raise Refused('wrong-type', 'exclude: an entry is not a string')
+        checked.append(_location({'exclude': entry}, 'exclude') if '/' in entry else entry)
+    return checked
+
+
+def exclusions(config):
+    """The exclusions in force at the node whose configuration is config:
+    its exclude entries, or DEFAULT_EXCLUDE when it declares none, or when
+    config is None."""
+    declared = None if config is None else config['exclude']
+    return list(DEFAULT_EXCLUDE) if declared is None else declared
+
+
+def unwalked(path, exclusions):
+    """Whether path, relative to the node whose exclusions these are, is a
+    directory they keep a walk out of. An entry with a slash names a path
+    and excludes it and what lies beneath it; any other names a
+    directory, with * for any text, wherever it lies beneath the node."""
+    name = path.rsplit('/', 1)[-1]
+    return any(_within(path, entry) if '/' in entry else fnmatchcase(name, entry)
+               for entry in exclusions)
+
+
 def read_config(text):
     """The configuration in text, a config.yaml's, checked: a dict of
     kind, projects, methodologies and image, each a string or None;
-    children, worktrees and archives, each a list with its defaults
-    filled in; and server, a dict or None. kind is 'responsibility' for a
+    exclude, a list of strings or None; children, worktrees and archives,
+    each a list with its defaults filled in; server, a dict or None; and
+    warnings, a list of strings, one for each key this reader does not
+    know, which it leaves unread. kind is 'responsibility' for a
     node that says where its projects belong, 'project' for one that says
     where its methodologies belong, and None for one that says neither,
     which is yet to be configured. Every scalar is read as the text
@@ -270,14 +314,15 @@ def read_config(text):
     known, version = _typed(parsed.get('pos'), 'integer')
     if known and version != VERSION:
         raise Refused('unknown-version', f'Not a version this reader knows: {version}')
+    warnings = []
     top = _mapping(parsed, 'The file', [('pos', 'integer', True), ('projects', 'string', False),
                                         ('methodologies', 'string', False), ('image', 'string', False),
-                                        ('children', 'sequence', False),
+                                        ('exclude', 'sequence', False), ('children', 'sequence', False),
                                         ('worktrees', 'sequence', False), ('archives', 'sequence', False),
-                                        ('server', 'mapping', False)])
+                                        ('server', 'mapping', False)], warnings)
     projects, methodologies = _location(top, 'projects'), _location(top, 'methodologies')
     image = top.get('image')
-    children = _children(top.get('children', []))
+    children = _children(top.get('children', []), warnings)
     if projects is not None and methodologies is not None:
         raise Refused('bad-value', 'A node says where its projects belong or its methodologies, not both')
     # A tool with no YAML reader finds the image by its line.
@@ -287,12 +332,14 @@ def read_config(text):
     return {'kind': ('responsibility' if projects is not None
                      else 'project' if methodologies is not None else None),
             'projects': projects, 'methodologies': methodologies, 'image': image,
+            'exclude': _exclusions(top.get('exclude')),
             'children': children,
-            'worktrees': _worktrees(top.get('worktrees', []), children),
-            'archives': _archives(top.get('archives', []), children),
+            'worktrees': _worktrees(top.get('worktrees', []), children, warnings),
+            'archives': _archives(top.get('archives', []), children, warnings),
             'server': (_mapping(top['server'], 'The server',
-                                [('name', 'string', True), ('mcp', 'string', True)])
-                       if 'server' in top else None)}
+                                [('name', 'string', True), ('mcp', 'string', True)], warnings, 'server')
+                       if 'server' in top else None),
+            'warnings': warnings}
 
 
 # Git
@@ -349,11 +396,12 @@ def config_file(directory):
     return _one_config(config_files(directory))
 
 
-def _config(directory, branch):
+def _config(directory, branch, made):
     """The configuration of the node at directory, or None if it has none.
     With branch, directory is a repository and it is read from that branch
     as committed; with None, from the working tree. A file that is refused
-    is refused, and so are two configurations."""
+    is refused, and so are two configurations. Its warnings go to made,
+    the plan being made, naming the node."""
     if branch is not None:
         listed = _git_line(directory, 'ls-tree', '--name-only', '-r', branch, '--', *CONFIG_PATHS)
         file = _one_config([name for name in (listed or '').split('\n') if name])
@@ -361,7 +409,11 @@ def _config(directory, branch):
     else:
         file = config_file(directory)
         text = None if file is None else Path(directory, file).read_text(encoding='utf-8')
-    return None if text is None else read_config(text)
+    if text is None:
+        return None
+    config = read_config(text)
+    made.warnings.extend(f'{made.rel(directory)}: {warning}' for warning in config['warnings'])
+    return config
 
 
 # The plan
@@ -380,14 +432,17 @@ class _Plan:
 
     def __init__(self, root):
         self.root = root
-        self.actions, self.findings = [], []
+        self.actions, self.findings, self.warnings = [], [], []
         self.archive_paths = {}
         self.archive_refused = set()
 
     def archives(self, repo, base, config):
-        """Collect this node's uncommitted archives, stopping at child boundaries."""
+        """Collect this node's uncommitted archives, stopping at child boundaries.
+        A directory the node's exclusions name is not looked into, though
+        one named archives is a scope wherever it lies."""
         policies = {entry['scope']: entry['kept'] for entry in config['archives']}
         boundaries = [entry['path'] for entry in config['children'] + config['worktrees']]
+        excluded = exclusions(config)
         scopes = {'.', *policies}
 
         def walk(directory, scope):
@@ -399,7 +454,7 @@ class _Plan:
                     continue
                 if name == 'archives':
                     scopes.add(scope)
-                elif (name not in _UNWALKED and not name.startswith(('.', '_'))
+                elif (not unwalked(relative, excluded)
                       and not _is_repository(full) and not config_files(full)):
                     walk(full, relative)
 
@@ -448,22 +503,27 @@ class _Plan:
         if not _excluded(directory, path):
             self.act('exclude', repository=self.rel(directory), path=path)
 
-    def undeclared(self, repo, mounted, local, prefix=''):
+    def undeclared(self, repo, mounted, local, excluded, prefix='', node=''):
         """Find what is beneath the repository at repo that no entry
         declares: a repository, and a directory holding a configuration.
         mounted are the declared paths of repositories, which are not
-        looked into, and local those of directories, which are; both
-        relative to repo. prefix is the directory being looked in, with
-        its final slash."""
+        looked into, and local those of directories, which are, each with
+        the exclusions it declares or None; both relative to repo.
+        excluded are the exclusions in force, declared by the node at
+        node, a prefix with its final slash or '' for repo; a local node
+        that declares its own replaces them beneath it. prefix is the
+        directory being looked in, with its final slash."""
         for name in sorted(os.listdir(os.path.join(repo, prefix))):
             path = prefix + name
             full = os.path.join(repo, path)
             if path in mounted or os.path.islink(full) or not os.path.isdir(full):
                 continue
-            if name in _UNWALKED or name.startswith(('.', '_')):
+            if unwalked(path[len(node):], excluded):
                 continue
             if path in local:
-                self.undeclared(repo, mounted, local, path + '/')
+                own = local[path]
+                self.undeclared(repo, mounted, local, excluded if own is None else own,
+                                path + '/', node if own is None else path + '/')
             # A submodule is the repository's own, tracked and declared by git.
             elif _is_repository(full):
                 if not _tracked(repo, path):
@@ -471,7 +531,7 @@ class _Plan:
             elif config_files(full):
                 self.find('undeclared', self.rel(full), 'a configuration')
             else:
-                self.undeclared(repo, mounted, local, path + '/')
+                self.undeclared(repo, mounted, local, excluded, path + '/', node)
 
     def declared(self, repo, base, config, mounted, local):
         """Plan what config declares, the configuration of the node at
@@ -480,7 +540,8 @@ class _Plan:
         (entry, node) with the entry's path relative to repo, and the
         directories of those that are there and are not planned. The
         declared paths of repositories are added to mounted and those of
-        directories to local, relative to repo."""
+        directories to local, with the exclusions each declares or None,
+        relative to repo."""
         nodes, held = [], []
         self.archives(repo, base, config)
         if config['kind'] is None:
@@ -507,7 +568,7 @@ class _Plan:
                 else:
                     try:
                         nodes.append(({**child, 'path': within},
-                                      self.mounts(path, _config(path, child['branch']))))
+                                      self.mounts(path, _config(path, child['branch'], self))))
                     except Refused as refused:
                         held.append(path)
                         self.find('config-refused', shown, f'{refused.kind}: {refused}')
@@ -523,10 +584,12 @@ class _Plan:
                 mounted.append(within)
                 self.find('path-taken', shown, 'a repository, declared with no remote')
             else:
-                local.append(within)
+                local[within] = None
                 try:
-                    own = _config(path, None)
+                    own = _config(path, None, self)
                     if own is not None:
+                        if own['exclude'] is not None:
+                            local[within] = exclusions(own)
                         below = self.declared(repo, path, own, mounted, local)
                         nodes.extend(below[0])
                         held.extend(below[1])
@@ -553,9 +616,9 @@ class _Plan:
         """Plan what is mounted in the repository at directory, and return
         its node, with a node for each repository beneath it that is
         mounted as declared, by this repository or by a directory of it."""
-        mounted, local = [], []
+        mounted, local = [], {}
         nodes, held = self.declared(directory, directory, config, mounted, local) if config else ([], [])
-        self.undeclared(directory, mounted, local)
+        self.undeclared(directory, mounted, local, exclusions(config))
         if config:
             self.archive_excludes(directory)
         return _Node(directory, nodes, held)
@@ -689,18 +752,21 @@ def _linkable(directory):
 def plan(root):
     """The plan for the tree at root, a repository: a dict of pos, the
     version; actions, what needs to be done, in an order it can be done
-    in; and findings, what was found and is not acted on. Paths in it are
-    relative to root. Nothing is changed and no network is used. Raises
-    Refused if root is not a repository."""
+    in; findings, what was found and is not acted on; and warnings, what
+    the configurations read said that this reader does not know, each a
+    string naming the node. Paths in it are relative to root. Nothing is
+    changed and no network is used. Raises Refused if root is not a
+    repository."""
     directory = os.path.abspath(root)
     if not _is_repository(directory):
         raise Refused('not-a-repository', f'Not a repository: {root}')
     made = _Plan(directory)
     try:
-        made.links(made.mounts(directory, _config(directory, None)), [])
+        made.links(made.mounts(directory, _config(directory, None, made)), [])
     except Refused as refused:
         made.find('config-refused', '.', f'{refused.kind}: {refused}')
-    return {'pos': VERSION, 'actions': made.actions, 'findings': made.findings}
+    return {'pos': VERSION, 'actions': made.actions, 'findings': made.findings,
+            'warnings': made.warnings}
 
 
 # The second step
