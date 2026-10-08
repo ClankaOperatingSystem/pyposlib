@@ -486,7 +486,7 @@ def catch_up(archive, ledger, keeper):
     A seal interrupted between the keeper's answer and the ledger's file
     leaves the keeper one event ahead. Refuses 'chain', with the ledger as it
     was, unless the keeper's events continue this ledger's and end at the
-    keeper's head."""
+    keeper's head. Returns the keeper's description."""
     described = keeper.describe()
     head, events = ai.history(archive)[1:3]
     written = []
@@ -508,12 +508,40 @@ def catch_up(archive, ledger, keeper):
         if events == 0 and ledger.is_dir() and not any(ledger.iterdir()):
             ledger.rmdir()
         raise
+    return described
+
+
+HELD_AT_ONCE = 1024  # CIDs a keeper is asked about in one request: the least it takes
+
+
+def ensure_held(keeper, files):
+    """Have the keeper hold every block of files, {cid: bytes}, under version
+    2: it is asked which blocks it lacks, in sorted order and at most
+    HELD_AT_ONCE at a time, and is put each of those. A seal interrupted
+    while putting resumes here, since what is held is not put again."""
+    blocks = {}
+    for data in files.values():
+        blocks.update(cid.blocks(data))
+    cids = sorted(blocks)
+    for start in range(0, len(cids), HELD_AT_ONCE):
+        for missing in keeper.held(cids[start:start + HELD_AT_ONCE]):
+            keeper.put(missing, blocks[missing])
+
+
+def send_event(keeper, version, name, event, files, claims, following=()):
+    """Append the event with files as the keeper's version takes them: inside
+    the append under version 1, put as blocks first under version 2."""
+    if version == 2:
+        ensure_held(keeper, files)
+        files = {}
+    return keeper.append(name, event, files, claims, following)
 
 
 def apply_kept(plan, expected, keeper, claims):
     """Apply plan to an archive a keeper keeps: each event is sent with its
-    files, written to the ledger once the keeper has it, and the item is
-    then removed from where it lay. Interrupted, it resumes."""
+    files, inside the append or as blocks put first by the keeper's version,
+    written to the ledger once the keeper has it, and the item is then
+    removed from where it lay. Interrupted, it resumes."""
     source, destination = Path(plan['source']), Path(plan['destination'])
     archive, ledger = Path(plan['archive']), Path(plan['ledger'])
     rel = os.path.relpath(destination, archive)
@@ -523,14 +551,14 @@ def apply_kept(plan, expected, keeper, claims):
         keeper = ai.keeper_of(plan['kept'])
     if claims is None:
         claims = claims_of(plan, expected)
-    catch_up(archive, ledger, keeper)
+    version = remote.version_of(catch_up(archive, ledger, keeper))
     sealed = sealed_so_far(plan)
     if not sealed and sha(encoded(ai.kept_entries(archive, ai.history(archive)[0]))) != plan['inventory_sha256']:
         raise Refused('plan', f'Archive changed since review: {archive}')
 
     def send(item, add, collections, empty, files):
         file, _, data = event_of(plan, item, add, collections, empty)
-        keeper.append(file, data, files, claims)
+        send_event(keeper, version, file, data, files, claims)
         ai.new_file(ledger / file, data)
 
     for rumour in plan['rumours']:
@@ -638,10 +666,11 @@ def keep(root, keeper_for=None, claims=None):
     keeper keeps and whose files are still on disk.
 
     The keeper is sent the events it lacks, in order, each with the files it
-    enrolled. A keeper that holds earlier events is taken to hold their
-    files; if it refuses the first schema 3 event for want of them, that
-    event is sent again with every file enrolled before it, since it is where
-    a keeper requires them. A first event that names no ledger, as those of a
+    enrolled: inside the append under version 1 of the protocol, put as
+    blocks first under version 2. A keeper that holds earlier events is taken
+    to hold their files; if it refuses the first schema 3 event for want of
+    them, that event is sent again with every file enrolled before it, since
+    it is where a keeper requires them. A first event that names no ledger, as those of a
     ledger begun before events carried a ledger_id, is sent with the events
     after it up to the first that names one, by which the keeper knows whose
     it is (remote.following). Once the keeper holds the ledger's head and its root, the archive
@@ -679,6 +708,7 @@ def keep(root, keeper_for=None, claims=None):
         keeper = (keeper_for or ai.keeper_of)(url)
         said = claims_of(dict(archive=str(archive)), None) if claims is None else claims
         described = keeper.describe()
+        version = remote.version_of(described)
         held = described['events']
         if held > len(files) or (held and described['head'] != files[held - 1].name[9:-5]):
             raise Refused('chain', f'The keeper holds another ledger than this one: {archive}')
@@ -698,14 +728,14 @@ def keep(root, keeper_for=None, claims=None):
             batch = batch_of(added[i])
             vouching = remote.following(events, i + 1)
             try:
-                keeper.append(*events[i], batch, said, vouching)
+                send_event(keeper, version, *events[i], batch, said, vouching)
             except Refused as refused:
                 # The keeper took an earlier event without its files: they
                 # go with the event at which it requires them.
                 if not (refused.kind == 'entry' and i == first and held):
                     raise
                 batch = batch_of(path for j in range(i + 1) for path in added[j])
-                keeper.append(*events[i], batch, said, vouching)
+                send_event(keeper, version, *events[i], batch, said, vouching)
             sent.update(batch)
         described = keeper.describe()
         if (described['head'], described['events'], described['root']) != (head, len(files), recorded):
