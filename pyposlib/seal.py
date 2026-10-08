@@ -831,6 +831,13 @@ def main(args):
             print(link(args[1]))
         elif len(args) == 2 and args[0] == 'fetch':
             sys.stdout.buffer.write(fetch(args[1]))
+        elif args[:1] == ['search']:
+            from . import search
+            found = search.command(args[1:])
+            if found is None:
+                sys.stderr.write(ai.USAGE)
+                return 2
+            return found
         elif len(args) == 2 and args[0] == 'sign-in':
             sys.stdout.buffer.write(encoded(signin.sign_in(args[1])))
         elif len(args) == 3 and args[0] == 'apply':
