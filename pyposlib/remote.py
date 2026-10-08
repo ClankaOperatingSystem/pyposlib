@@ -364,9 +364,24 @@ class Keeper:
         return searching.found(sources, query, mode, limit, self.modes)
 
 
+def in_shard(blocks, links, digest, level, name):
+    """The CID linked under name in the HAMT shard whose links these are,
+    or None: name is placed by byte level of digest, its hash, as
+    cid.shard places it, under the slot's two hex digits and the name, or
+    in the sub-shard linked under the digits alone."""
+    slot = b'%02X' % digest[level]
+    for child, linked, _ in links:
+        if linked == slot + name:
+            return child
+        if linked == slot:
+            return in_shard(blocks, cid.parse(blocks[cid.text(child)])[0], digest, level + 1, name)
+    return None
+
+
 def walk(blocks, cid_text, parts):
     """The bytes at parts beneath the block cid_text of blocks; KeyError if
-    there is nothing there, or what is there is a directory."""
+    there is nothing there, or what is there is a directory, plain or a
+    HAMT shard."""
     block = blocks[cid_text]
     if cid.codec(cid_text) != cid.DAG_PB:
         if parts:
@@ -380,6 +395,14 @@ def walk(blocks, cid_text, parts):
             if name == parts[0].encode():
                 return walk(blocks, cid.text(child), parts[1:])
         raise KeyError(parts[0])
+    if data[:2] == b'\x08\x05':
+        if not parts:
+            raise KeyError('a directory')
+        name = parts[0].encode()
+        child = in_shard(blocks, links, cid.murmur3_x64_64(name), 0, name)
+        if child is None:
+            raise KeyError(parts[0])
+        return walk(blocks, cid.text(child), parts[1:])
     if parts:
         raise KeyError(parts[0])
     return b''.join(walk(blocks, cid.text(child), []) for child, _, _ in links)
