@@ -395,9 +395,10 @@ class Trees(unittest.TestCase):
     # Names, kinds and directories
 
     def test_a_configuration_has_either_name(self):
-        """Either directory and either file name is read, alike."""
+        """Any of the directory names and either file name is read, alike."""
         origin = repository(self.path('origins/child'), {'README': 'child\n'})
         for number, file in enumerate(('.clanka/config.yaml', '.clanka/config.yml',
+                                       '.clankos/config.yaml', '.clankos/config.yml',
                                        '.pos/config.yaml', '.pos/config.yml')):
             with self.subTest(file):
                 root = repository(self.path(f'root-{number}'), {'README': 'root\n'})
@@ -406,8 +407,8 @@ class Trees(unittest.TestCase):
                 self.assertEqual(summary(self.plan(root)), ['exclude . work', 'clone work'])
 
     def test_two_configurations_are_refused(self):
-        """Both directories, or both file names in one, and nothing is planned."""
-        for number, other in enumerate(('.pos/config.yaml', '.clanka/config.yml')):
+        """Two directories, or both file names in one, and nothing is planned."""
+        for number, other in enumerate(('.pos/config.yaml', '.clankos/config.yaml', '.clanka/config.yml')):
             with self.subTest(other):
                 root = repository(self.path(f'root-{number}'), {'README': 'root\n'})
                 write(root, '.clanka/config.yaml', 'pos: 2\nprojects: projects/\n')

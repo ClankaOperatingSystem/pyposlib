@@ -21,7 +21,7 @@ The package is =pyposlib/=:
   section 8 of poslib's =doc/remote-archive-protocol.txt= specifies: the
   authorization code flow with PKCE to a loopback address, when a person
   asks for it; the token kept in one file, which poslib reads too.
-- =tree.py= :: a node's configuration, in =.clanka/= or =.pos/=, as
+- =tree.py= :: a node's configuration, in =.clanka/=, =.clankos/= or =.pos/=, as
   poslib's =doc/pos-directory.txt= specifies: read and checked, with its
   defaults filled in; the plan of what a tree needs, which changes
   nothing; and its application. Its command line is poslib's
