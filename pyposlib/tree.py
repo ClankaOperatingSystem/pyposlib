@@ -398,13 +398,22 @@ def read_config(text):
 
 # The declaration
 
+_URL = re.compile(r'[A-Za-z][A-Za-z0-9+.-]*://')
+
+
+def is_url(value):
+    """Whether value is a URL: a scheme, then ://."""
+    return bool(_URL.match(value))
+
+
 def _declared_path(value, what):
-    """value, the path of a what in a project, as written; one that does not
-    stay beneath the project is refused. A final slash, which marks a
-    directory of instances, is allowed."""
+    """value, where a what of a kind is, as written: a path beneath the
+    project, refused if it does not stay beneath it, a final slash allowed,
+    which marks a directory of instances; or a URL, for a kind kept outside
+    the repository, taken as written."""
     path = value[:-1] if len(value) > 1 and value.endswith('/') else value
-    if not _path(path):
-        raise Refused('bad-path', f'Not a path for {what}: {value}')
+    if not (is_url(value) or _path(path)):
+        raise Refused('bad-path', f'Not a path or a URL for {what}: {value}')
     return value
 
 
