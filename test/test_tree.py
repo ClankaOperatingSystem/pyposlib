@@ -111,6 +111,24 @@ def config(*children):
     return {'.pos/config.yaml': text(*children)}
 
 
+def method(name, *commands):
+    """The files of a methodology name: the skill name-greet and each of
+    commands, a command."""
+    files = {f'skills/{name}-greet/SKILL.md': f'---\nname: {name}-greet\ndescription: A skill.\n---\n'}
+    files.update({f'bin/{command}': '#!/bin/sh\n' for command in commands})
+    return files
+
+
+def project(*children):
+    """A project's config.yaml, with bin, declaring children."""
+    return ('pos: 2\nmethodologies: methodologies\nbin: bin\n'
+            + ('children:\n' + ''.join(children) if children else 'children: []\n'))
+
+
+def beneath(prefix, files):
+    return {f'{prefix}/{path}': content for path, content in files.items()}
+
+
 def summary(plan):
     """A plan as a list of strings, its actions and then its findings."""
     lines = []
@@ -769,6 +787,126 @@ class Trees(unittest.TestCase):
             self.addCleanup(stdout.buffer.close)
             self.assertEqual(tree.main(['apply', root, file, given]), 0)
         self.assertEqual(names(root), ['clankos-capture'])
+
+    # Methodologies
+
+    def test_a_mounted_methodology_is_linked_in_place(self):
+        """A project's methodology supplies its skill and command by links to
+        it. The links are made beside the source's, nothing of it is copied
+        into auto/, nothing in it changes, and a second plan is empty."""
+        given = source(self.path('source'), '1', 'clankos-capture', 'pos-capture')
+        hello = repository(self.path('origins/hello'), method('hello', 'hello-greet'))
+        mounted = repository(self.path('origins/project'),
+                             {'.clanka/config.yml': project(child('methodologies/hello', hello))})
+        root = repository(self.path('root'), {'.clanka/config.yml': text(child('projects/p', mounted))})
+        in_project = os.path.join(root, 'projects/p')
+        self.assertEqual(summary(self.settle(root, given)), [])
+        self.assertEqual(os.readlink(os.path.join(in_project, '.agents/skills/hello-greet')),
+                         '../../methodologies/hello/skills/hello-greet')
+        self.assertEqual(os.readlink(os.path.join(in_project, '.agents/skills/clankos-capture')),
+                         '../../.clanka/auto/skills/clankos-capture')
+        self.assertEqual(os.readlink(os.path.join(in_project, 'bin/hello-greet')),
+                         '../methodologies/hello/bin/hello-greet')
+        self.assertEqual(os.readlink(os.path.join(in_project, 'bin/pos-capture')), '../.clanka/auto/bin/pos-capture')
+        self.assertTrue(os.path.exists(os.path.join(in_project, '.agents/skills/hello-greet/SKILL.md')))
+        self.assertEqual(names(in_project, '.clanka/auto/skills'), ['clankos-capture'])
+        self.assertEqual(os.readlink(os.path.join(in_project, '.claude/skills')), '../.agents/skills')
+        for repo in (root, in_project, os.path.join(in_project, 'methodologies/hello')):
+            self.assertEqual(status(repo), '')
+        self.assertEqual(summary(self.plan(root, given)), [])
+
+    def test_a_directory_project_links_its_local_methodology(self):
+        """A project that is a directory of a repository has its links made
+        there. Its methodology is a directory of the same repository, with no
+        remote; the links are relative to the project and excluded."""
+        given = source(self.path('source'), '1', 'clankos-capture')
+        root = repository(self.path('root'), {
+            '.clanka/config.yml': text('  - path: projects/p\n'),
+            'projects/p/.clanka/config.yml': project('  - path: methodologies/notes\n'),
+            **beneath('projects/p/methodologies/notes', method('notes', 'notes-take'))})
+        in_project = os.path.join(root, 'projects/p')
+        self.assertEqual(summary(self.settle(root, given)), [])
+        self.assertEqual(os.readlink(os.path.join(in_project, '.agents/skills/notes-greet')),
+                         '../../methodologies/notes/skills/notes-greet')
+        self.assertEqual(os.readlink(os.path.join(in_project, 'bin/notes-take')),
+                         '../methodologies/notes/bin/notes-take')
+        self.assertEqual(os.readlink(os.path.join(in_project, '.claude/skills')), '../.agents/skills')
+        self.assertEqual(names(in_project), ['notes-greet'])
+        self.assertEqual(names(root), ['clankos-capture'])
+        self.assertEqual(status(root), '')
+        self.assertEqual(summary(self.plan(root, given)), [])
+
+    def test_a_skill_without_its_methodologys_prefix_is_refused(self):
+        """A methodology with a skill not named after it is found and supplies
+        nothing. The source's links are made all the same."""
+        given = source(self.path('source'), '1', 'clankos-capture')
+        root = repository(self.path('root'), {
+            '.clanka/config.yml': project('  - path: methodologies/hello\n'),
+            'methodologies/hello/skills/greet/SKILL.md': '---\nname: greet\ndescription: A skill.\n---\n',
+            'methodologies/hello/bin/hello-greet': '#!/bin/sh\n'})
+        made = self.settle(root, given)
+        self.assertEqual(summary(made), ['methodology-refused methodologies/hello'])
+        self.assertEqual(made['findings'][0]['detail'], 'a skill not named hello-NAME: greet')
+        self.assertEqual(names(root), ['clankos-capture'])
+        self.assertFalse(os.path.exists(os.path.join(root, 'bin')))
+
+    def test_a_methodology_no_longer_declared_loses_its_links(self):
+        """When a methodology's entry goes, its links are removed and it is
+        left. Its repository, still there, is found as undeclared."""
+        hello = repository(self.path('origins/hello'), method('hello', 'hello-greet'))
+        root = repository(self.path('root'), {'.clanka/config.yml': project(child('methodologies/hello', hello))})
+        self.assertEqual(summary(self.settle(root)), [])
+        commit(root, {'.clanka/config.yml': project()})
+        self.assertEqual(summary(self.plan(root)),
+                         ['unlink .agents/skills/hello-greet', 'unlink bin/hello-greet',
+                          'undeclared methodologies/hello'])
+        self.settle(root)
+        self.assertFalse(os.path.islink(os.path.join(root, '.agents/skills/hello-greet')))
+        self.assertTrue(os.path.exists(os.path.join(root, 'methodologies/hello/skills/hello-greet/SKILL.md')))
+
+    def test_the_same_repository_is_a_product_elsewhere(self):
+        """One repository is a methodology in one place and a product in
+        others. A project mounts it beneath its methodologies path and, on
+        another branch, as a product; a responsibility mounts it as a
+        product. Only the methodology mount is read; nothing is written in a
+        product."""
+        hello = repository(self.path('origins/hello'), method('hello', 'hello-greet'))
+        mounted = repository(self.path('origins/project'), {
+            '.clanka/config.yml': project(child('methodologies/hello', hello),
+                                          child('products/hello', hello, 'branch: next'))})
+        root = repository(self.path('root'), {
+            '.clanka/config.yml': text(child('projects/p', mounted), child('products/hello', hello))})
+        in_project = os.path.join(root, 'projects/p')
+        git(hello, 'branch', 'next')
+        self.assertEqual(summary(self.settle(root)), [])
+        self.assertEqual(os.readlink(os.path.join(in_project, '.agents/skills/hello-greet')),
+                         '../../methodologies/hello/skills/hello-greet')
+        for product in (os.path.join(in_project, 'products/hello'), os.path.join(root, 'products/hello')):
+            self.assertFalse(os.path.exists(os.path.join(product, '.agents')))
+            self.assertFalse(os.path.exists(os.path.join(product, '.clanka')))
+            self.assertEqual(status(product), '')
+        self.assertEqual(tree._git_line(os.path.join(in_project, 'products/hello'), 'symbolic-ref', '--short', 'HEAD'),
+                         'next')
+
+    def test_a_methodology_named_clankos_is_refused(self):
+        """The reader refuses a methodology named clankos, so nothing is planned."""
+        root = repository(self.path('root'), {
+            '.clanka/config.yml': project(child('methodologies/clankos', 'git@example.org:clankos.git'))})
+        self.assertEqual(summary(self.plan(root)), ['config-refused .'])
+
+    def test_two_methodologies_supplying_one_name_are_found(self):
+        """Where two methodologies supply one command, the first is linked.
+        The second is found as a name taken, named by more than one."""
+        root = repository(self.path('root'), {
+            '.clanka/config.yml': project('  - path: methodologies/alpha\n', '  - path: methodologies/beta\n'),
+            **beneath('methodologies/alpha', method('alpha', 'greet')),
+            **beneath('methodologies/beta', method('beta', 'greet'))})
+        made = self.settle(root)
+        self.assertEqual(summary(made), ['name-taken bin/greet'])
+        self.assertEqual(made['findings'][0]['detail'], 'named by more than one')
+        self.assertEqual(os.readlink(os.path.join(root, 'bin/greet')), '../methodologies/alpha/bin/greet')
+        self.assertEqual(names(root), ['alpha-greet', 'beta-greet'])
+
 
 if __name__ == '__main__':
     unittest.main()

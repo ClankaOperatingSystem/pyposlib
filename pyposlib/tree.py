@@ -24,10 +24,14 @@ a tree to what its files declare.
 What is installed comes from a source the tool is given, a directory of
 skills and commands. It is copied into auto/ in the configuration
 directory of each repository that has a configuration, and links to it
-are made where a coding agent and a person look. Nothing is written in a
-repository with no configuration, a product.
+are made where a coding agent and a person look. A project's
+methodologies, the children directly beneath its methodologies path,
+supply skills and commands the same way, by links to them where they
+lie, with nothing copied. Nothing is written in a repository with no
+configuration, a product.
 
 - read_config: a config.yaml's text, checked, with defaults filled in.
+- methodologies: the methodologies a configuration declares, by name.
 - config_file: the configuration file a node has.
 - plan: what needs to be done for the tree at a root; it changes nothing
   and uses no network.
@@ -175,6 +179,32 @@ def _distinct(paths, what):
         if path in seen:
             raise Refused('bad-path', f'{what} is named twice: {path}')
         seen.add(path)
+
+
+def _check_methodologies(at, children):
+    """Refuse one of children beneath at, the methodologies path, that is
+    not a methodology: a methodology's path is at and one more part, its
+    name, which is not clankos."""
+    for child in children:
+        path = child['path']
+        if _within(path, at):
+            name = path[len(at) + 1:] if len(path) > len(at) else None
+            if not name or '/' in name:
+                raise Refused('bad-path', f'A methodology is one part beneath {at}: {path}')
+            if name == 'clankos':
+                raise Refused('bad-value', f'The name clankos is reserved: {path}')
+
+
+def methodologies(config):
+    """The methodologies config declares, each (name, path), by name. A
+    methodology is a child directly beneath the path config says its
+    methodologies belong at; its name is the last part of its path, which
+    is relative to the node. None for a node that is no project."""
+    at = config['methodologies']
+    if at is None:
+        return []
+    return sorted((child['path'][len(at) + 1:], child['path'])
+                  for child in config['children'] if _within(child['path'], at))
 
 
 def _own_scope(path, children, what):
@@ -341,6 +371,8 @@ def read_config(text):
     children = _children(top.get('children', []), warnings)
     if projects is not None and methodologies is not None:
         raise Refused('bad-value', 'A node says where its projects belong or its methodologies, not both')
+    if methodologies is not None:
+        _check_methodologies(methodologies, children)
     # A tool with no YAML reader finds the image by its line.
     if image is not None and not (_IMAGE.fullmatch(image)
                                   and re.search(f'^image: {re.escape(image)}$', text, re.MULTILINE)):
@@ -438,12 +470,14 @@ def _config(directory, branch, made):
 class _Node:
     """A repository of the tree that is mounted as declared: its
     configuration, or None; its children mounted as declared, each (entry,
-    node); and held, the directories of its children that are there and are
-    not planned, because of a finding."""
+    node); held, the directories of its children that are there and are
+    not planned, because of a finding; and locals, the directories of the
+    repository that have a configuration of their own, each (directory,
+    config)."""
 
-    def __init__(self, directory, config, children, held):
+    def __init__(self, directory, config, children, held, locals=()):
         self.directory, self.config = directory, config
-        self.children, self.held = children, held
+        self.children, self.held, self.locals = children, held, list(locals)
 
 
 class _Plan:
@@ -552,7 +586,7 @@ class _Plan:
             else:
                 self.undeclared(repo, mounted, local, excluded, path + '/', node)
 
-    def declared(self, repo, base, config, mounted, local):
+    def declared(self, repo, base, config, mounted, local, locals):
         """Plan what config declares, the configuration of the node at
         base, which is the repository at repo or a directory of it. Return
         (nodes, held): a node for each repository mounted as declared, as
@@ -560,7 +594,8 @@ class _Plan:
         directories of those that are there and are not planned. The
         declared paths of repositories are added to mounted and those of
         directories to local, with the exclusions each declares or None,
-        relative to repo."""
+        relative to repo; a directory with a configuration of its own is
+        added to locals with it, as (directory, config)."""
         nodes, held = [], []
         self.archives(repo, base, config)
         if config['kind'] is None:
@@ -607,9 +642,10 @@ class _Plan:
                 try:
                     own = _config(path, None, self)
                     if own is not None:
+                        locals.append((path, own))
                         if own['exclude'] is not None:
                             local[within] = exclusions(own)
-                        below = self.declared(repo, path, own, mounted, local)
+                        below = self.declared(repo, path, own, mounted, local, locals)
                         nodes.extend(below[0])
                         held.extend(below[1])
                 except Refused as refused:
@@ -635,12 +671,13 @@ class _Plan:
         """Plan what is mounted in the repository at directory, and return
         its node, with a node for each repository beneath it that is
         mounted as declared, by this repository or by a directory of it."""
-        mounted, local = [], {}
-        nodes, held = self.declared(directory, directory, config, mounted, local) if config else ([], [])
+        mounted, local, locals = [], {}, []
+        nodes, held = (self.declared(directory, directory, config, mounted, local, locals)
+                       if config else ([], []))
         self.undeclared(directory, mounted, local, exclusions(config))
         if config:
             self.archive_excludes(directory)
-        return _Node(directory, config, nodes, held)
+        return _Node(directory, config, nodes, held, locals)
 
     def taken(self, directory, path):
         """Find path, in the repository at directory, held by something not
@@ -654,51 +691,62 @@ class _Plan:
             detail = 'untracked'
         self.find('name-taken', self.rel(os.path.join(directory, path)), detail)
 
-    def link_in(self, directory, within, names, targets, auto):
+    def link_in(self, directory, within, links, owned):
         """Plan the tool's links in within, a directory of the repository at
-        directory. Each of names is to be a link to the entry of that name
-        in targets, a directory of auto. A name held by something else is
-        found and left, and another of the tool's links there is removed."""
+        directory. links are (name, targets): name is to be a link to the
+        entry of that name in targets, a directory in one of owned, the
+        directories the tool's links point into. A name held by something
+        else is found and left; a name links gives twice is found for its
+        second; and another of the tool's links there is removed."""
         inside = os.path.join(directory, within)
         closed = _closed(directory, within)
         if closed is not None:
-            if names:
+            if links:
                 self.taken(directory, closed)
             return
-        for name in names:
+        names = []
+        for name, targets in links:
             path, link = f'{within}/{name}', os.path.join(inside, name)
             target = os.path.relpath(os.path.join(targets, name), inside)
-            if _own_link(link, auto):
+            if name in names:
+                self.find('name-taken', self.rel(link), 'named by more than one')
+            elif _own_link(link, owned):
+                names.append(name)
                 self.exclude(directory, path)
                 if os.readlink(link) != target:
                     self.act('unlink', path=self.rel(link))
                     self.act('link', path=self.rel(link), target=target)
             elif os.path.lexists(link):
+                names.append(name)
                 self.taken(directory, path)
             else:
+                names.append(name)
                 self.exclude(directory, path)
                 self.act('link', path=self.rel(link), target=target)
         if os.path.isdir(inside):
             for name in sorted(os.listdir(inside)):
                 link = os.path.join(inside, name)
-                if name not in names and _own_link(link, auto):
+                if name not in names and _own_link(link, owned):
                     self.act('unlink', path=self.rel(link))
 
-    def claude(self, directory, skills, auto):
-        """Plan .claude/skills in the repository at directory for skills,
-        installed in auto. Absent, it is to be a link to ../.agents/skills
-        when there are skills there. An ordinary directory has the tool's
-        links made in it too, and its note. A file or a symbolic link,
-        there or at .claude, is left."""
-        inside = os.path.join(directory, '.claude', 'skills')
-        closed = _closed(directory, '.claude/skills')
+    def claude(self, directory, prefix, links, owned):
+        """Plan .claude/skills beneath prefix in the repository at directory
+        for links. prefix is a directory of the repository, relative and
+        ending in a slash, or empty for the repository itself; links and
+        owned are as link_in takes them. Absent, .claude/skills is to be a
+        link to ../.agents/skills when there are skills there. An ordinary
+        directory has the tool's links made in it too, and its note. A file
+        or a symbolic link, there or at .claude, is left."""
+        skills_path, agents_path = prefix + '.claude/skills', prefix + '.agents/skills'
+        inside = os.path.join(directory, skills_path)
+        closed = _closed(directory, skills_path)
         ordinary = closed is None and os.path.isdir(inside)
         if closed is not None:
             pass
         elif ordinary:
-            self.link_in(directory, '.claude/skills', skills, os.path.join(auto, 'skills'), auto)
-            path, note = f'.claude/skills/{NOTE}', os.path.join(inside, NOTE)
-            if not skills:
+            self.link_in(directory, skills_path, links, owned)
+            path, note = f'{skills_path}/{NOTE}', os.path.join(inside, NOTE)
+            if not links:
                 pass
             elif _tracked(directory, path):
                 self.taken(directory, path)
@@ -707,20 +755,55 @@ class _Plan:
                 if not (os.path.isfile(note)
                         and Path(note).read_text(encoding='utf-8') == _note_text(inside)):
                     self.act('note', path=self.rel(note))
-        elif skills or _agents_entries(directory):
-            self.exclude(directory, '.claude/skills')
+        elif links or _agents_entries(directory, agents_path):
+            self.exclude(directory, skills_path)
             self.act('link', path=self.rel(inside), target='../.agents/skills')
         # The note went with the directory's entries when they were moved.
-        stray = os.path.join(directory, '.agents', 'skills', NOTE)
+        stray = os.path.join(directory, agents_path, NOTE)
         if (not ordinary and os.path.isfile(stray)
-                and not _tracked(directory, f'.agents/skills/{NOTE}')):
+                and not _tracked(directory, f'{agents_path}/{NOTE}')):
             self.act('unlink', path=self.rel(stray))
+
+    def methodology_links(self, base, config):
+        """What the methodologies config declares at base supply: (skills,
+        commands), each a list of (name, directory) as link_in takes, by
+        methodology and then by name. A methodology not there is left for
+        its clone; one with a skill not named after it is found
+        (methodology-refused) and supplies nothing."""
+        skills, commands = [], []
+        for name, path in methodologies(config):
+            directory = os.path.join(base, path)
+            if not os.path.isdir(directory):
+                continue
+            held = _held(directory, 'skills')
+            bad = next((skill for skill in held if not skill.startswith(name + '-')), None)
+            if bad is not None:
+                self.find('methodology-refused', self.rel(directory), f'a skill not named {name}-NAME: {bad}')
+                continue
+            skills.extend((skill, os.path.join(directory, 'skills')) for skill in held)
+            commands.extend((command, os.path.join(directory, 'bin')) for command in _held(directory, 'bin'))
+        return skills, commands
+
+    def in_directory(self, directory, base, config):
+        """Plan the links to the methodologies of the project at base, a
+        directory of the repository at directory, with config its own."""
+        if config['methodologies'] is None:
+            return
+        prefix = os.path.relpath(base, directory) + '/'
+        owned = [os.path.join(base, config['methodologies'])]
+        skills, commands = self.methodology_links(base, config)
+        self.link_in(directory, prefix + '.agents/skills', skills, owned)
+        if config['bin'] is not None:
+            self.link_in(directory, prefix + config['bin'], commands, owned)
+        self.claude(directory, prefix, skills, owned)
 
     def installs(self, node):
         """Plan what is installed in node and in the repositories beneath
         it. A repository with a configuration has auto/ in its configuration
         directory, replaced from the source when its version is another, and
-        links to what auto/ holds. One with none, a product, has nothing
+        links to what auto/ holds and to what its methodologies supply. A
+        project that is a directory of it has links to its own
+        methodologies. One with no configuration, a product, has nothing
         planned in it but the removal of links an earlier tool made."""
         directory = node.directory
         for name in _agents_entries(directory):
@@ -728,19 +811,25 @@ class _Plan:
                 self.act('unlink', path=self.rel(os.path.join(directory, '.agents/skills', name)))
         auto = _auto(directory) if node.config else None
         if auto is not None:
+            config = node.config
             version = _version(self.source) if self.source else None
             stale = version is not None and version != _version(auto)
             held = self.source if stale else auto
-            skills = _held(held, 'skills')
+            at = config['methodologies']
+            owned = [auto] + ([os.path.join(directory, at)] if at is not None else [])
+            supplied_skills, supplied_commands = self.methodology_links(directory, config)
+            skills = [(name, os.path.join(auto, 'skills')) for name in _held(held, 'skills')] + supplied_skills
+            commands = [(name, os.path.join(auto, 'bin')) for name in _held(held, 'bin')] + supplied_commands
             if stale or os.path.lexists(auto):
                 self.exclude(directory, os.path.relpath(auto, directory))
             if stale:
                 self.act('install', path=self.rel(auto), version=version)
-            self.link_in(directory, '.agents/skills', skills, os.path.join(auto, 'skills'), auto)
-            if node.config['bin'] is not None:
-                self.link_in(directory, node.config['bin'], _held(held, 'bin'),
-                             os.path.join(auto, 'bin'), auto)
-            self.claude(directory, skills, auto)
+            self.link_in(directory, '.agents/skills', skills, owned)
+            if config['bin'] is not None:
+                self.link_in(directory, config['bin'], commands, owned)
+            self.claude(directory, '', skills, owned)
+        for base, own in node.locals:
+            self.in_directory(directory, base, own)
         for _, child in node.children:
             self.installs(child)
 
@@ -815,12 +904,14 @@ def _auto(directory):
     return None if file is None else os.path.join(directory, os.path.dirname(file), 'auto')
 
 
-def _own_link(link, auto):
-    """Whether link is a symbolic link whose target is in auto."""
+def _own_link(link, owned):
+    """Whether link is a symbolic link whose target is in one of owned, the
+    directories the tool's links point into: auto/, and the methodologies
+    of a project."""
     if not os.path.islink(link):
         return False
     target = os.path.normpath(os.path.join(os.path.dirname(link), os.readlink(link)))
-    return target.startswith(auto + '/')
+    return any(target.startswith(directory + '/') for directory in owned)
 
 
 def _closed(directory, path):
@@ -837,12 +928,13 @@ def _closed(directory, path):
     return None
 
 
-def _agents_entries(directory):
-    """The names in .agents/skills of the repository at directory, sorted:
-    none where a part of that path is not an ordinary directory."""
-    skills = os.path.join(directory, '.agents', 'skills')
+def _agents_entries(directory, path='.agents/skills'):
+    """The names in path, .agents/skills by default, of the repository at
+    directory, sorted: none where a part of that path is not an ordinary
+    directory."""
+    skills = os.path.join(directory, path)
     return (sorted(os.listdir(skills))
-            if _closed(directory, '.agents/skills') is None and os.path.isdir(skills) else [])
+            if _closed(directory, path) is None and os.path.isdir(skills) else [])
 
 
 def _note_text(inside):
@@ -853,8 +945,7 @@ def _note_text(inside):
     listed = ('\nA skill is a directory holding a SKILL.md. These entries are not,\n'
               'and no agent reads them as skills:\n\n'
               + ''.join(f'  {name}\n' for name in others)) if others else ''
-    return ('ClankOS made the links named clankos-* in this directory, and this\n'
-            'note.\n\n'
+    return ('ClankOS made the symbolic links in this directory, and this note.\n\n'
             "Coding agents share skills from .agents/skills/. This directory's\n"
             'skills can be moved there, and .claude/skills replaced by a symbolic\n'
             'link to ../.agents/skills. ClankOS then makes its links in the one\n'
