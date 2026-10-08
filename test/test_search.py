@@ -141,6 +141,25 @@ class OnDisk(unittest.TestCase):
             self.assertEqual('absent', refusal(lambda: search.scope(kept.dir, 'result', within=cid.cid_bytes(b'x'),
                                                                     keeper_for=keeper_for)))
 
+    def test_a_keeper_that_does_not_search_is_named(self):
+        """A kept archive whose keeper declares no search is refused as absent
+        before anything is searched, naming the archive and the keeper; a
+        within does not hide it."""
+        with KeptScope() as kept:
+            silent = remote.Keeper(modes=())
+            kept.seal('trial', silent)
+            keeper_for = lambda url: kept.client(silent)  # noqa: E731
+            for ask in (dict(), dict(within=cid.cid_bytes(b'x'))):
+                with self.subTest(**ask):
+                    try:
+                        search.scope(kept.dir, 'result', keeper_for=keeper_for, **ask)
+                    except ai.Refused as refused:
+                        self.assertEqual('absent', refused.kind)
+                        self.assertIn(str(kept.scope / 'archives'), str(refused))
+                        self.assertIn('does not search', str(refused))
+                    else:
+                        self.fail('not refused')
+
     def test_the_command_prints_grep_s_shape_with_a_reference(self):
         """search ROOT QUERY prints LINK:LINE:TEXT a line, in the archive's
         order, and exits 0; nothing found exits 1 and prints nothing; the
