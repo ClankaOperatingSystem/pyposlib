@@ -16,15 +16,17 @@
 """The remote archive protocol, as poslib's doc/remote-archive-protocol.txt specifies.
 
 A ledger stays with its scope; the archive it enrols may be kept away
-from it, by a keeper reached at a URL. Six operations pass between them,
-under version 2 of the protocol; a keeper of version 1 alone takes a
-file's bytes inside the append that enrols it, and a client speaks the
+from it, by a keeper reached at a URL. Seven operations pass between
+them, under version 2 of the protocol; a keeper of version 1 alone takes
+a file's bytes inside the append that enrols it, and a client speaks the
 highest version a keeper lists (version_of).
 
-- RemoteArchive: the port a sealing client calls, a typing.Protocol.
-- HttpRemoteArchive: that port over HTTP, the protocol's wire.
+- RemoteArchive: the port a sealing client calls, a typing.Protocol;
+  search.ArchiveSearch is the port a reading client searches through.
+- HttpRemoteArchive: both ports over HTTP, the protocol's wire.
 - Keeper: the keeping side, in memory: it verifies what it is sent as
-  the protocol requires, and is what a server wraps around its storage.
+  the protocol requires, searches what it holds in literal mode, and is
+  what a server wraps around its storage.
 - named, following: the ledger a run of events names, and the events a
   client sends after one that names none.
 - handle: the wire's keeping side, one request to one response.
@@ -41,6 +43,7 @@ import urllib.request
 from . import archive_integrity as ai
 from .archive_integrity import Refused, encoded, sha
 from . import cid
+from . import search as searching
 from . import signin
 
 VERSIONS = (1, 2)
@@ -66,7 +69,8 @@ class RemoteArchive(Protocol):
 
     def describe(self) -> dict:
         """What the keeper holds of the ledger: protocol, protocols and any
-        retiring, ledger_id, head, events, root and erased."""
+        retiring, ledger_id, head, events, root and erased; and search, the
+        modes it searches in, where it searches."""
         ...
 
     def held(self, cids: Sequence[str]) -> list[str]:
@@ -161,20 +165,27 @@ class Keeper:
     protocols, and one without 1 takes no file inside an append. retiring,
     by version, is the date after which it may stop serving that version.
     A block put before any event enrols it is held until forgotten, which
-    this keeper never does; a server may, after the protocol's seven days."""
+    this keeper never does; a server may, after the protocol's seven days.
 
-    def __init__(self, ledger_id=None, events=(), blocks=None, erased=None, protocols=VERSIONS, retiring=None):
+    modes is what it searches in, over the blocks it holds, literal alone
+    by default; one given no modes does not search, and describes no
+    search member. A server that answers a ranked mode from an index of
+    its own declares that mode and answers it itself."""
+
+    def __init__(self, ledger_id=None, events=(), blocks=None, erased=None, protocols=VERSIONS, retiring=None,
+                 modes=('literal',)):
         self.ledger_id = ledger_id
         self.events, self.claims = list(events), []
         self.blocks = {} if blocks is None else blocks
         self.erased = {} if erased is None else erased
         self.protocols = tuple(sorted(protocols))
         self.retiring = dict(retiring or {})
+        self.modes = tuple(modes)
         self._cids = None
 
     def _state(self, events):
-        entries, head, root, _, _, empty = ai.chain(events)
-        return entries, head, root, empty
+        entries, head, root, collections, items, empty = ai.chain(events)
+        return entries, head, root, empty, collections, items
 
     def cids(self):
         """What the ledger folds to, {path: cid}; nothing while it holds a
@@ -182,7 +193,7 @@ class Keeper:
         if self._cids is None:
             self._cids = {}
             if self.events:
-                entries, _, _, empty = self._state(self.events)
+                entries, _, _, empty, _, _ = self._state(self.events)
                 try:
                     self._cids = ai.fold(entries, empty)
                 except Refused:
@@ -192,7 +203,7 @@ class Keeper:
     def describe(self):
         head, root = None, None
         if self.events:
-            _, head, root, _ = self._state(self.events)
+            _, head, root, _, _, _ = self._state(self.events)
         # A ledger with no event yet has no id to describe, whichever the
         # keeper was told to keep.
         described = dict(protocol=self.protocols[0], ledger_id=self.ledger_id if self.events else None, head=head,
@@ -201,6 +212,8 @@ class Keeper:
             described['protocols'] = list(self.protocols)
             if self.retiring:
                 described['retiring'] = {str(v): d for v, d in sorted(self.retiring.items())}
+        if self.modes:
+            described['search'] = dict(modes=list(self.modes))
         return described
 
     def held(self, cids):
@@ -277,7 +290,7 @@ class Keeper:
         for given, data in files.items():
             if not ai.is_cid(given) or cid.cid_bytes(data) != given:
                 raise Refused('entry', f'Bytes are not those of the CID they were sent under: {given}')
-        entries, head, root, empty = self._state([*self.events, (name, event)])
+        entries, head, root, empty, _, _ = self._state([*self.events, (name, event)])
         value = json.loads(event)
         self.whose(name, event, list(following))
         # What was kept before this event: everything, if the event before
@@ -330,6 +343,26 @@ class Keeper:
         except KeyError:
             raise Refused('absent', f'Nothing at {path!r} under {cid_text}')
 
+    def search(self, query, mode=None, limit=None, within=None):
+        """Where query is found in the files the ledger enrols, over the
+        blocks held: hits in the archive's order, by path then line, each
+        naming its file as a sealed item's links do. A file whose bytes are
+        erased gives no hit, nor does one that is not UTF-8. Refused as
+        'absent' by a keeper given no modes, and for a within the ledger does
+        not enrol; as 'mode' for a mode not in modes."""
+        if not self.modes:
+            raise Refused('absent', 'This keeper does not search')
+        cids = self.cids()
+        entries, _, _, _, collections, items = self._state(self.events)
+        chosen = searching.beneath(cids, within) if within is not None else (lambda path: True)
+
+        def read(given):
+            return lambda: walk(self.blocks, given, [])
+        sources = [(searching.reference(path, cids, items, collections), read(cids[path]))
+                   for path in searching.by_path(entries)
+                   if path in cids and cids[path] not in self.erased and chosen(path)]
+        return searching.found(sources, query, mode, limit, self.modes)
+
 
 def walk(blocks, cid_text, parts):
     """The bytes at parts beneath the block cid_text of blocks; KeyError if
@@ -354,7 +387,7 @@ def walk(blocks, cid_text, parts):
 
 # --------------------------------------------------------------------- wire
 
-STATUS = {'chain': 409, 'absent': 404, 'erased': 410, 'size': 413, 'access': 403, 'version': 422}
+STATUS = {'chain': 409, 'absent': 404, 'erased': 410, 'size': 413, 'access': 403, 'version': 422, 'mode': 422}
 KIND = {401: 'access', 403: 'access', 404: 'absent', 409: 'chain', 410: 'erased', 413: 'size'}
 JSON, BYTES = 'application/json', 'application/octet-stream'
 
@@ -386,10 +419,21 @@ def parts_of(body, content_type):
     return parts
 
 
+def query_of(query):
+    """The parameters of a URL's query, {name: value}, each percent-decoded:
+    a plus is a plus, as the protocol encodes a space as %20."""
+    parameters = {}
+    for pair in query.split('&') if query else ():
+        name, _, value = pair.partition('=')
+        parameters[urllib.parse.unquote(name)] = urllib.parse.unquote(value)
+    return parameters
+
+
 def handle(keeper, method, path, headers, body):
     """Answer one request of the wire against keeper: (status, content type, body).
-    path is the request's, below the ledger's base URL."""
+    path is the request's, below the ledger's base URL, with its query."""
     try:
+        path, _, query = path.partition('?')
         event = re.fullmatch(r'/events/([1-9][0-9]*)', path)
         read = re.fullmatch(r'/ipfs/(b[a-z2-7]+)(?:/(.*))?', path)
         block = re.fullmatch(r'/blocks/(b[a-z2-7]+)', path)
@@ -409,6 +453,15 @@ def handle(keeper, method, path, headers, body):
             return 200, BYTES, keeper.event(int(event[1]))
         if method == 'GET' and read:
             return 200, BYTES, keeper.read(read[1], urllib.parse.unquote(read[2] or ''))
+        if method == 'GET' and path == '/search':
+            asked = query_of(query)
+            limit = asked.get('limit')
+            if limit is not None:
+                if not limit.isdecimal() or int(limit) < 1:
+                    raise Refused('request', f'limit is a positive integer: {limit}')
+                limit = int(limit)
+            hits = keeper.search(asked.get('q'), asked.get('mode'), limit, asked.get('within'))
+            return 200, JSON, encoded(dict(hits=hits))
         if method == 'POST' and path == '/events':
             kinds = [v for k, v in headers.items() if k.lower() == 'content-type']
             parts = parts_of(body or b'', kinds[0] if kinds else None)
@@ -452,8 +505,8 @@ def send(method, url, headers, body):
 
 
 class HttpRemoteArchive:
-    """RemoteArchive over HTTP: the ledger's base URL, and a bearer token if
-    the keeper wants one. Given no token, a request carries the one kept for
+    """RemoteArchive and search.ArchiveSearch over HTTP: the ledger's base
+    URL, and a bearer token if the keeper wants one. Given no token, a request carries the one kept for
     the keeper by signing in, if there is one (signin). send is the exchange,
     replaced in tests."""
 
@@ -509,6 +562,15 @@ class HttpRemoteArchive:
 
     def read(self, cid_text, path=''):
         return self.call('GET', f'/ipfs/{cid_text}' + (f'/{urllib.parse.quote(path)}' if path else ''))
+
+    def search(self, query, mode=None, limit=None, within=None):
+        """The hits the keeper answers: q, then mode, limit and within where
+        given, each percent-encoded but for RFC 3986's unreserved characters,
+        as poslib sends them."""
+        parameters = [('q', query), ('mode', mode), ('limit', limit), ('within', within)]
+        asked = '&'.join(f'{name}={urllib.parse.quote(str(value), safe="")}'
+                         for name, value in parameters if value is not None)
+        return json.loads(self.call('GET', f'/search?{asked}'))['hits']
 
 
 def server(keeper, host='127.0.0.1', port=0, token=None):
