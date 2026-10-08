@@ -51,6 +51,15 @@ def read(text):
         return refused.kind
 
 
+def read_methodology(text):
+    """What read_methodology makes of text: its declaration, or the kind
+    it is refused with."""
+    try:
+        return tree.read_methodology(text)
+    except Refused as refused:
+        return refused.kind
+
+
 def git(directory, *args):
     subprocess.run(['git', *args], cwd=directory, check=True, capture_output=True)
 
@@ -172,6 +181,20 @@ class Reader(unittest.TestCase):
             with self.subTest(name):
                 expected = fixture['refused'] if 'refused' in fixture else fixture['config']
                 self.assertEqual(read(fixture['yaml']), expected)
+
+    def test_a_declaration_is_read_as_the_fixtures_say(self):
+        found = fixtures('pos-methodology')
+        self.assertGreater(len(found), 5)
+        for name, fixture in found:
+            with self.subTest(name):
+                expected = fixture['refused'] if 'refused' in fixture else fixture['declaration']
+                self.assertEqual(read_methodology(fixture['yaml']), expected)
+
+    def test_a_declaration_is_read_from_its_file_or_is_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(tree.read_methodology_file(directory))
+            Path(directory, 'methodology.yaml').write_text('methodology: 1\nchecks:\n  - adr-check\n', encoding='utf-8')
+            self.assertEqual(tree.read_methodology_file(directory)['checks'], ['adr-check'])
 
     def test_a_scalar_is_the_text_written_whatever_yaml_would_make_of_it(self):
         made = tree.read_config(
