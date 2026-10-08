@@ -176,15 +176,19 @@ def scope(root, query, mode=None, limit=None, within=None, keeper_for=None):
     """The hits of query in each archive under root, as check finds them
     (ai.roots), in their order: [(archive, hits)]. An archive on disk is
     searched here and one a keeper keeps by its keeper, which keeper_for
-    makes of its URL, ai.keeper_of by default. limit caps the hits of all
-    together. With within, an archive that enrols nothing under it gives
-    nothing, and it is refused as absent only where none does."""
+    makes of its URL, ai.keeper_of by default; a keeper that declares no
+    search is refused as absent, naming the archive, before anything is
+    searched. limit caps the hits of all together. With within, an archive
+    that enrols nothing under it gives nothing, and it is refused as absent
+    only where none does."""
     answers, left, enrolled = [], limit, within is None
     for archive in ai.roots(root):
         if left is not None and left < 1:
             break
         url = ai.kept(archive)
         adapter = (keeper_for or ai.keeper_of)(url) if url else DiskArchiveSearch(archive)
+        if url and not adapter.describe().get('search'):
+            raise Refused('absent', f'The keeper of {archive} does not search: {url}')
         try:
             hits = adapter.search(query, mode, left, within)
         except Refused as refused:
