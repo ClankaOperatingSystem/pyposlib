@@ -32,7 +32,9 @@ The package is =pyposlib/=:
   defaults filled in; the plan of what a tree needs, which changes
   nothing; and its application. Its command line is poslib's
   =pos-tree-batch=, command for command: =python -m pyposlib.tree plan
-  ROOT=, or =pyposlib-tree= installed.
+  ROOT=, or =pyposlib-tree= installed. It also reads a methodology's
+  declaration, =methodology.yaml=, as poslib's =doc/pos-methodology.txt=
+  specifies, held to the fixtures in =fixtures/pos-methodology/=.
 
 Beside it, =archive_integrity.py= at the top runs the command line from
 a checkout, and =test/= holds the unittest tests.

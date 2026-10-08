@@ -32,6 +32,9 @@ configuration, a product.
 
 - read_config: a config.yaml's text, checked, with defaults filled in.
 - methodologies: the methodologies a configuration declares, by name.
+- read_methodology, read_methodology_file: a methodology's declaration,
+  methodology.yaml, as poslib's doc/pos-methodology.txt specifies: the
+  kinds of canon it maintains in a project and the checks it supplies.
 - config_file: the configuration file a node has.
 - plan: what needs to be done for the tree at a root; it changes nothing
   and uses no network.
@@ -57,6 +60,8 @@ import yaml
 from .archive_integrity import CONFIG_PATHS, Refused, config_files, encoded
 
 VERSION = 2
+METHODOLOGY_FILE = 'methodology.yaml'
+METHODOLOGY_VERSION = 1
 
 _WORKTREE = re.compile(r'(?:(.+)/)?_worktrees/[^/]+')
 _IMAGE = re.compile(r'[^ \t\n"\'#]+')
@@ -389,6 +394,87 @@ def read_config(text):
                                 [('name', 'string', True), ('mcp', 'string', True)], warnings, 'server')
                        if 'server' in top else None),
             'warnings': warnings}
+
+
+# The declaration
+
+def _declared_path(value, what):
+    """value, the path of a what in a project, as written; one that does not
+    stay beneath the project is refused. A final slash, which marks a
+    directory of instances, is allowed."""
+    path = value[:-1] if len(value) > 1 and value.endswith('/') else value
+    if not _path(path):
+        raise Refused('bad-path', f'Not a path for {what}: {value}')
+    return value
+
+
+def _kinds(entries, warnings):
+    """The kinds of canon in entries, checked, defaults filled in."""
+    kinds, names = [], set()
+    for index, entry in enumerate(entries):
+        kind = _mapping(entry, 'A kind', [('kind', 'string', True), ('at', 'string', True),
+                                          ('format', 'string', False), ('derived', 'string', False),
+                                          ('entrance', 'string', False)], warnings, f'canon[{index}]')
+        if kind['kind'] in names:
+            raise Refused('bad-value', f'A kind is declared twice: {kind["kind"]}')
+        names.add(kind['kind'])
+        derived = kind.get('derived')
+        if derived not in (None, 'true', 'false'):
+            raise Refused('bad-value', f'derived is true or false: {kind["kind"]}')
+        kinds.append({'kind': kind['kind'], 'at': _declared_path(kind['at'], 'at'),
+                      'format': kind.get('format'), 'derived': derived == 'true',
+                      'entrance': (_declared_path(kind['entrance'], 'entrance')
+                                   if 'entrance' in kind else kind['at'])})
+    return kinds
+
+
+def _checks(names):
+    """names, a sequence of check names, checked."""
+    checks = []
+    for name in names:
+        ok, typed = _typed(name, 'string')
+        if not ok:
+            raise Refused('wrong-type', 'A check is not a string')
+        if '/' in typed:
+            raise Refused('bad-value', f'A check is a name in bin/, not a path: {typed}')
+        checks.append(typed)
+    return checks
+
+
+def read_methodology(text):
+    """The declaration in text, a methodology.yaml's, checked: a dict of
+    methodology, the version; canon, a list of kinds, each a dict of kind,
+    at, format, derived and entrance with defaults filled in; checks, a
+    list of names; and warnings, a list of strings, one for each key this
+    reader does not know. Raises Refused, of a kind doc/pos-methodology.txt
+    names, for a file it does not allow."""
+    try:
+        parsed = yaml.load(text, Loader=yaml.BaseLoader)
+    except yaml.YAMLError:
+        raise Refused('not-yaml', 'Not readable as YAML') from None
+    if parsed is None:
+        parsed = {}
+    if not _is_mapping(parsed):
+        raise Refused('not-a-mapping', 'The declaration is not a mapping')
+    known, version = _typed(parsed.get('methodology'), 'integer')
+    if known and version != METHODOLOGY_VERSION:
+        raise Refused('unknown-version', f'Not a version this reader knows: {version}')
+    warnings = []
+    top = _mapping(parsed, 'The declaration', [('methodology', 'integer', True), ('canon', 'sequence', False),
+                                               ('checks', 'sequence', False)], warnings)
+    return {'methodology': METHODOLOGY_VERSION,
+            'canon': _kinds(top.get('canon', []), warnings),
+            'checks': _checks(top.get('checks', [])),
+            'warnings': warnings}
+
+
+def read_methodology_file(directory):
+    """The declaration of the methodology at directory, or None if it has
+    none. Raises Refused for one this reader does not allow."""
+    file = Path(directory) / METHODOLOGY_FILE
+    if not file.is_file():
+        return None
+    return read_methodology(file.read_text(encoding='utf-8'))
 
 
 # Git
