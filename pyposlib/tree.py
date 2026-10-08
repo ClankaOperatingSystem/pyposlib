@@ -33,6 +33,7 @@ repository with no configuration, a product.
   and uses no network.
 - apply: do a plan, if the tree still gives it, and return the plan that
   remains.
+- install: do only what a plan installs and links.
 - main: the command line, poslib's pos-tree-batch command for command.
 
 The agent files of the document's section 5 are not planned: a server is
@@ -981,6 +982,18 @@ def ignore_archives(root):
     return plan(root)
 
 
+def install(root, source):
+    """Apply only what is installed at root from source, and return the
+    remaining plan: the exclude, install, link, unlink and note actions of
+    a fresh plan made with source. Clone no repository and change no
+    archive rule."""
+    directory, held = os.path.abspath(root), os.path.abspath(source)
+    for action in plan(root, source)['actions']:
+        if action['do'] in ('exclude', 'install', 'link', 'unlink', 'note'):
+            _do(directory, action, held)
+    return plan(root, source)
+
+
 # Command line
 
 USAGE = """Usage: COMMAND ...  (help prints this)
@@ -998,6 +1011,10 @@ USAGE = """Usage: COMMAND ...  (help prints this)
       update only the managed archive rules in Git's info/exclude;
       print the remaining plan; do not clone repositories, install or
       link
+  install ROOT SOURCE
+      install from SOURCE and bring the links to it up to date; print
+      the remaining plan; do not clone repositories or change archive
+      rules
 
 Exit 0 nothing to do, 1 something to do or to report, 2 refused.
 """
@@ -1011,6 +1028,8 @@ def main(args=None):
             made = plan(*args[1:])
         elif len(args) == 2 and args[0] == 'archives':
             made = ignore_archives(args[1])
+        elif len(args) == 3 and args[0] == 'install':
+            made = install(args[1], args[2])
         elif len(args) in (3, 4) and args[0] == 'apply':
             text = sys.stdin.buffer.read() if args[2] == '-' else Path(args[2]).read_bytes()
             try:
