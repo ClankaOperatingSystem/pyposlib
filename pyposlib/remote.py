@@ -223,12 +223,11 @@ class Keeper:
     def holds_dag(self, cid_text):
         """Whether the block cid_text names is held with every block it links,
         through every level: what it is for an entry's bytes to be held."""
-        block = self.blocks.get(cid_text)
-        if block is None:
+        if cid_text not in self.blocks:
             return False
         if cid.codec(cid_text) != cid.DAG_PB:
             return True
-        links, _ = cid.parse(block)
+        links, _ = cid.parse(self.blocks[cid_text])
         return all(self.holds_dag(cid.text(child)) for child, _, _ in links)
 
     def event(self, number):
