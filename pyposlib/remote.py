@@ -16,7 +16,10 @@
 """The remote archive protocol, as poslib's doc/remote-archive-protocol.txt specifies.
 
 A ledger stays with its scope; the archive it enrols may be kept away
-from it, by a keeper reached at a URL. Four operations pass between them.
+from it, by a keeper reached at a URL. Six operations pass between them,
+under version 2 of the protocol; a keeper of version 1 alone takes a
+file's bytes inside the append that enrols it, and a client speaks the
+highest version a keeper lists (version_of).
 
 - RemoteArchive: the port a sealing client calls, a typing.Protocol.
 - HttpRemoteArchive: that port over HTTP, the protocol's wire.
@@ -40,17 +43,40 @@ from .archive_integrity import Refused, encoded, sha
 from . import cid
 from . import signin
 
-VERSION = 1
+VERSIONS = (1, 2)
+BLOCK_LIMIT = 1048576  # the largest block of an archive: one raw leaf
 SILENCE = 60  # seconds a keeper may say nothing before a request is given up
 
 
+def version_of(described):
+    """The version a client speaks to the keeper described: the highest of
+    VERSIONS the keeper lists under protocols, or 1 where it lists none, as
+    a keeper of version 1 alone does. Refused as 'version' where none is
+    shared."""
+    offered = described.get('protocols') or [described.get('protocol', 1)]
+    shared = [v for v in VERSIONS if v in offered]
+    if not shared:
+        raise Refused('version', f'The keeper serves protocol versions {offered}; this client speaks {list(VERSIONS)}')
+    return max(shared)
+
+
 class RemoteArchive(Protocol):
-    """A ledger's archive, kept away from it: the four operations of the
+    """A ledger's archive, kept away from it: the operations of the
     protocol. Each raises Refused, of the kind the keeper names."""
 
     def describe(self) -> dict:
-        """What the keeper holds of the ledger: protocol, ledger_id, head,
-        events, root and erased."""
+        """What the keeper holds of the ledger: protocol, protocols and any
+        retiring, ledger_id, head, events, root and erased."""
+        ...
+
+    def held(self, cids: Sequence[str]) -> list[str]:
+        """Which of cids the keeper holds no block for, in their order.
+        Version 2."""
+        ...
+
+    def put(self, cid_text: str, data: bytes) -> bool:
+        """Hold the block cid_text names, data; True if it was not held before.
+        Version 2."""
         ...
 
     def event(self, number: int) -> bytes:
@@ -60,10 +86,12 @@ class RemoteArchive(Protocol):
     def append(self, name: str, event: bytes, files: Mapping[str, bytes],
                claims: Mapping[str, str], following: Sequence[tuple[str, bytes]] = ()) -> dict:
         """Append the event of bytes event, the ledger file name names, with
-        files by their CIDs and the client's claims; the description after.
-        following is the events after it, each (name, bytes) in order, by
-        which an event that names no ledger is known for this ledger's
-        (following). The same event at the same number again changes nothing."""
+        the client's claims; the description after. files, by their CIDs,
+        travel with the event under version 1 and are empty under version 2,
+        whose bytes are put as blocks first. following is the events after
+        it, each (name, bytes) in order, by which an event that names no
+        ledger is known for this ledger's (following). The same event at the
+        same number again changes nothing."""
         ...
 
     def read(self, cid_text: str, path: str = '') -> bytes:
@@ -126,13 +154,22 @@ class Keeper:
     which it uses only membership, reading and assignment; and erased,
     a mapping of CID to when. It writes blocks before it counts an
     event appended, so that whoever records the event after append
-    returns records nothing whose bytes are not held."""
+    returns records nothing whose bytes are not held.
 
-    def __init__(self, ledger_id=None, events=(), blocks=None, erased=None):
+    protocols is the versions it serves, VERSIONS by default; one of (1,)
+    is a keeper of version 1 alone, whose describe has protocol and no
+    protocols, and one without 1 takes no file inside an append. retiring,
+    by version, is the date after which it may stop serving that version.
+    A block put before any event enrols it is held until forgotten, which
+    this keeper never does; a server may, after the protocol's seven days."""
+
+    def __init__(self, ledger_id=None, events=(), blocks=None, erased=None, protocols=VERSIONS, retiring=None):
         self.ledger_id = ledger_id
         self.events, self.claims = list(events), []
         self.blocks = {} if blocks is None else blocks
         self.erased = {} if erased is None else erased
+        self.protocols = tuple(sorted(protocols))
+        self.retiring = dict(retiring or {})
         self._cids = None
 
     def _state(self, events):
@@ -158,8 +195,41 @@ class Keeper:
             _, head, root, _ = self._state(self.events)
         # A ledger with no event yet has no id to describe, whichever the
         # keeper was told to keep.
-        return dict(protocol=VERSION, ledger_id=self.ledger_id if self.events else None, head=head,
-                    events=len(self.events), root=root, erased=sorted(self.erased))
+        described = dict(protocol=self.protocols[0], ledger_id=self.ledger_id if self.events else None, head=head,
+                         events=len(self.events), root=root, erased=sorted(self.erased))
+        if self.protocols != (1,):
+            described['protocols'] = list(self.protocols)
+            if self.retiring:
+                described['retiring'] = {str(v): d for v, d in sorted(self.retiring.items())}
+        return described
+
+    def held(self, cids):
+        """Which of cids the keeper holds no block for, in their order."""
+        if not isinstance(cids, list) or not all(isinstance(c, str) and ai.is_cid(c) for c in cids):
+            raise Refused('request', 'Expected an array of CIDs')
+        return [c for c in cids if c not in self.blocks]
+
+    def put(self, cid_text, data):
+        """Hold the block cid_text names; True if it was not held before.
+        Refused as entry unless data is that block, as size above BLOCK_LIMIT."""
+        if len(data) > BLOCK_LIMIT:
+            raise Refused('size', f'A block is at most {BLOCK_LIMIT} bytes')
+        if not ai.is_cid(cid_text) or cid.text(cid.binary_cid(cid.codec(cid_text), data)) != cid_text:
+            raise Refused('entry', f'Bytes are not those of the CID they were put under: {cid_text}')
+        new = cid_text not in self.blocks
+        self.blocks[cid_text] = data
+        return new
+
+    def holds_dag(self, cid_text):
+        """Whether the block cid_text names is held with every block it links,
+        through every level: what it is for an entry's bytes to be held."""
+        block = self.blocks.get(cid_text)
+        if block is None:
+            return False
+        if cid.codec(cid_text) != cid.DAG_PB:
+            return True
+        links, _ = cid.parse(block)
+        return all(self.holds_dag(cid.text(child)) for child, _, _ in links)
 
     def event(self, number):
         if not 1 <= number <= len(self.events):
@@ -202,6 +272,9 @@ class Keeper:
             return self.describe()
         if number != len(self.events) + 1:
             raise Refused('chain', f'The next event is number {len(self.events) + 1}')
+        if files and 1 not in self.protocols:
+            raise Refused('version', f'Files travel inside an append only in version 1; this keeper serves '
+                                     f'{list(self.protocols)}: put the blocks first')
         for given, data in files.items():
             if not ai.is_cid(given) or cid.cid_bytes(data) != given:
                 raise Refused('entry', f'Bytes are not those of the CID they were sent under: {given}')
@@ -219,7 +292,7 @@ class Keeper:
                 raise Refused('root', 'The ledger does not fold to the event\'s root')
             for path in (value['add'] if kept else entries):
                 given = entries[path]['cid']
-                if (given not in files and given not in self.blocks
+                if (given not in files and not self.holds_dag(given)
                         and not any(part.startswith('.') for part in path.split('/'))):
                     raise Refused('entry', f'Bytes not held for {path}')
         for data in files.values():
@@ -282,7 +355,7 @@ def walk(blocks, cid_text, parts):
 
 # --------------------------------------------------------------------- wire
 
-STATUS = {'chain': 409, 'absent': 404, 'erased': 410, 'size': 413, 'access': 403}
+STATUS = {'chain': 409, 'absent': 404, 'erased': 410, 'size': 413, 'access': 403, 'version': 422}
 KIND = {401: 'access', 403: 'access', 404: 'absent', 409: 'chain', 410: 'erased', 413: 'size'}
 JSON, BYTES = 'application/json', 'application/octet-stream'
 
@@ -320,8 +393,19 @@ def handle(keeper, method, path, headers, body):
     try:
         event = re.fullmatch(r'/events/([1-9][0-9]*)', path)
         read = re.fullmatch(r'/ipfs/(b[a-z2-7]+)(?:/(.*))?', path)
+        block = re.fullmatch(r'/blocks/(b[a-z2-7]+)', path)
         if method == 'GET' and path in ('', '/'):
             return 200, JSON, encoded(keeper.describe())
+        if method in ('POST', 'PUT') and (path == '/blocks' or block) and 2 not in keeper.protocols:
+            raise Refused('version', f'Blocks are put in version 2; this keeper serves {list(keeper.protocols)}')
+        if method == 'POST' and path == '/blocks':
+            try:
+                cids = json.loads(body or b'')
+            except ValueError:
+                raise Refused('request', 'Expected a JSON array of CIDs')
+            return 200, JSON, encoded(dict(missing=keeper.held(cids)))
+        if method == 'PUT' and block:
+            return (201 if keeper.put(block[1], body or b'') else 200), JSON, encoded({})
         if method == 'GET' and event:
             return 200, BYTES, keeper.event(int(event[1]))
         if method == 'GET' and read:
@@ -377,7 +461,8 @@ class HttpRemoteArchive:
     def __init__(self, url, token=None, send=send):
         self.url, self.token, self.send = url.rstrip('/'), token, send
 
-    def call(self, method, path, body=None, content_type=None):
+    def call(self, method, path, body=None, content_type=None, status_too=False):
+        """The body the keeper answers with, or with status_too (status, body)."""
         token = self.token or signin.token_for(self.url)
 
         def exchange(token):
@@ -395,7 +480,7 @@ class HttpRemoteArchive:
             if adopted:
                 status, answer = exchange(adopted)
         if status in (200, 201):
-            return answer
+            return (status, answer) if status_too else answer
         try:
             refusal = json.loads(answer)
             kind, message = refusal['refused'], refusal.get('message', '')
@@ -410,6 +495,12 @@ class HttpRemoteArchive:
 
     def event(self, number):
         return self.call('GET', f'/events/{number}')
+
+    def held(self, cids):
+        return json.loads(self.call('POST', '/blocks', encoded(list(cids)), JSON))['missing']
+
+    def put(self, cid_text, data):
+        return self.call('PUT', f'/blocks/{cid_text}', data, BYTES, status_too=True)[0] == 201
 
     def append(self, name, event, files, claims, following=()):
         body, content_type = multipart([('name', name.encode()), ('event', event),

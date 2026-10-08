@@ -111,7 +111,8 @@ class Protocol(unittest.TestCase):
         ledger's, and what was sealed reads back by CID and by path."""
         keeper = remote.Keeper()
         client = over(keeper)
-        self.assertEqual(dict(protocol=1, ledger_id=None, head=None, events=0, root=None, erased=[]),
+        self.assertEqual(dict(protocol=1, protocols=[1, 2], ledger_id=None, head=None, events=0, root=None,
+                              erased=[]),
                          client.describe())
         with Scope() as scope:
             first = scope.seal('first', {'a.txt': b'first'})
@@ -135,6 +136,85 @@ class Protocol(unittest.TestCase):
                            lambda: client.read(root, 'second/hollow'), lambda: client.read(root, 'nowhere'),
                            lambda: client.read(cid.cid_bytes(b'never sealed'))):
                 self.assertEqual('absent', refusal(absent))
+
+    def test_under_version_2_the_blocks_are_put_before_the_event(self):
+        """The client asks which blocks the keeper lacks, puts those, and
+        appends the event alone; a block put again is not new; what was
+        sealed reads back whole."""
+        keeper = remote.Keeper()
+        client = over(keeper)
+        with Scope() as scope:
+            big = bytes(i % 251 for i in range(2 * cid.CHUNK_SIZE + 1))
+            name, event, files = scope.seal('first', {'a.txt': b'first', 'big': big})
+            blocks = {}
+            for data in files.values():
+                blocks.update(cid.blocks(data))
+            cids = sorted(blocks)
+            self.assertEqual(5, len(cids))  # a leaf, three leaves and the node over them
+            self.assertEqual(cids, client.held(cids))
+            self.assertEqual('entry', refusal(lambda: client.append(name, event, {}, {})))
+            self.assertEqual([True] * 5, [client.put(c, blocks[c]) for c in cids])
+            self.assertFalse(client.put(cids[0], blocks[cids[0]]))
+            self.assertEqual([], client.held(cids))
+            self.assertEqual(1, client.append(name, event, {}, {})['events'])
+            folded = ai.fold_cids(scope.scope / 'archives')
+            self.assertEqual(big, client.read(folded['first/big']))
+            self.assertEqual(b'first', client.read(folded['first/a.txt']))
+
+    def test_an_entry_is_held_only_with_every_block_beneath_it(self):
+        """A file of several chunks is held when its node and all its leaves
+        are: the node alone is not enough."""
+        keeper = remote.Keeper()
+        client = over(keeper)
+        with Scope() as scope:
+            big = bytes(i % 251 for i in range(2 * cid.CHUNK_SIZE + 1))
+            name, event, files = scope.seal('first', {'big': big})
+            blocks = cid.blocks(big)
+            root = cid.cid_bytes(big)
+            client.put(root, blocks[root])
+            self.assertEqual('entry', refusal(lambda: client.append(name, event, {}, {})))
+            for c, block in blocks.items():
+                client.put(c, block)
+            self.assertEqual(1, client.append(name, event, {}, {})['events'])
+
+    def test_what_is_put_is_verified(self):
+        keeper = remote.Keeper()
+        client = over(keeper)
+        leaf = cid.cid_bytes(b'hello')
+        self.assertEqual('entry', refusal(lambda: client.put(leaf, b'other bytes')))
+        self.assertEqual('size', refusal(lambda: client.put(leaf, bytes(remote.BLOCK_LIMIT + 1))))
+        self.assertEqual('request', refusal(lambda: client.held(['not a cid'])))
+        self.assertEqual(422, remote.handle(keeper, 'POST', '/blocks', {}, b'{"not": "an array"}')[0])
+        self.assertEqual([leaf], client.held([leaf]))
+
+    def test_a_keeper_of_version_2_alone_takes_no_file_inside_an_append(self):
+        keeper = remote.Keeper(protocols=(2,))
+        client = over(keeper)
+        self.assertEqual((2, [2]), (client.describe()['protocol'], client.describe()['protocols']))
+        with Scope() as scope:
+            name, event, files = scope.seal('first', {'a.txt': b'first'})
+            self.assertEqual('version', refusal(lambda: client.append(name, event, files, {})))
+            self.assertEqual(0, keeper.describe()['events'])
+
+    def test_a_keeper_of_version_1_alone_has_no_blocks_and_says_so(self):
+        keeper = remote.Keeper(protocols=(1,))
+        client = over(keeper)
+        self.assertNotIn('protocols', client.describe())
+        leaf = cid.cid_bytes(b'hello')
+        self.assertEqual('version', refusal(lambda: client.put(leaf, b'hello')))
+        self.assertEqual('version', refusal(lambda: client.held([leaf])))
+
+    def test_the_version_spoken_is_the_highest_shared(self):
+        self.assertEqual(1, remote.version_of(dict(protocol=1)))
+        self.assertEqual(2, remote.version_of(dict(protocol=1, protocols=[1, 2])))
+        self.assertEqual(2, remote.version_of(dict(protocol=2, protocols=[2])))
+        self.assertEqual(1, remote.version_of(dict(protocol=1, protocols=[1])))
+        self.assertEqual('version', refusal(lambda: remote.version_of(dict(protocol=3, protocols=[3]))))
+
+    def test_a_retiring_version_is_announced_with_its_date(self):
+        keeper = remote.Keeper(retiring={1: '2027-01-31'})
+        self.assertEqual({'1': '2027-01-31'}, over(keeper).describe()['retiring'])
+        self.assertNotIn('retiring', remote.Keeper().describe())
 
     def test_an_event_again_changes_nothing_and_another_is_refused(self):
         with Scope() as scope:
@@ -447,6 +527,10 @@ def call(client, spec):
         return dict(bytes=client.event(spec['number']).decode())
     if operation == 'read':
         return dict(bytes=client.read(spec['cid'], spec.get('path', '')).decode())
+    if operation == 'held':
+        return dict(missing=client.held(spec['cids']))
+    if operation == 'put':
+        return dict(held='new' if client.put(spec['cid'], spec['block'].encode()) else 'already')
     return client.append(spec['name'], spec['event'].encode(),
                          {k: v.encode() for k, v in spec['files'].items()}, spec['claims'],
                          [(later['name'], later['event'].encode()) for later in spec.get('following', [])])
@@ -481,7 +565,7 @@ class Tapes(unittest.TestCase):
         ledger the tape says it keeps, if it says: the status recorded, and
         the body recorded, or for a refusal its kind."""
         for name, tape in fixtures('remote'):
-            keeper = remote.Keeper(tape.get('ledger_id'))
+            keeper = remote.Keeper(tape.get('ledger_id'), protocols=tape.get('protocols', remote.VERSIONS))
             for index, exchange in enumerate(tape['exchanges']):
                 with self.subTest(f'{name} {index}'):
                     answered = {}
