@@ -730,6 +730,24 @@ class Trees(unittest.TestCase):
         self.settle(root, given)
         self.assertEqual(os.readlink(link), elsewhere)
 
+    def test_installing_alone_clones_nothing(self):
+        """Only what is installed is done, and the rest stays planned: a
+        declared child that is not there is excluded and stays to be cloned."""
+        given = source(self.path('source'), '1', 'clankos-capture')
+        origin = repository(self.path('origins/child'), {'README': 'child\n'})
+        root = repository(self.path('root'),
+                          {'.clanka/config.yml': text(child('projects/child', origin))})
+        remaining = tree.install(root, given)
+        self.assertEqual(remaining, self.plan(root, given))
+        self.assertEqual(summary(remaining), ['clone projects/child'])
+        self.assertTrue(os.path.exists(os.path.join(root, '.agents/skills/clankos-capture/SKILL.md')))
+        self.assertFalse(os.path.exists(os.path.join(root, 'projects/child')))
+        self.assertEqual(status(root), '')
+        with mock.patch('sys.stdout') as stdout:
+            stdout.buffer = open(os.devnull, 'wb')
+            self.addCleanup(stdout.buffer.close)
+            self.assertEqual(tree.main(['install', root, given]), 1)
+
     def test_a_source_that_is_not_one_is_refused(self):
         root = repository(self.path('root'), {'.clanka/config.yml': text()})
         write(self.dir, 'unversioned/skills/clankos-a/SKILL.md', '---\n---\n')
