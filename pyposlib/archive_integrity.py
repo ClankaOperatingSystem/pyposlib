@@ -942,6 +942,9 @@ USAGE = """Usage: COMMAND ...  (help prints this; Emacs itself takes --help)
   fetch LINK
       print the bytes of the archived file LINK names, an ipfs:// link,
       from a scope above the current directory: on disk or its keeper's
+  search ROOT QUERY [--mode MODE] [--limit N] [--within CID]
+      print each line QUERY is found on in the archives under ROOT, on
+      disk or at their keepers, as LINK:LINE:TEXT; exit 1 if none
   sign-in URL
       sign in to the keeper at URL, in a browser, and keep the token
 
@@ -962,7 +965,8 @@ def checkpoint_root(root):
 def main(args=None):
     """The command line poslib's pos-seal-batch has, command for command."""
     args = sys.argv[1:] if args is None else args
-    if args[:1] in (['seal'], ['write-new'], ['apply'], ['convert'], ['keep'], ['recall'], ['link'], ['fetch'], ['sign-in']):
+    if args[:1] in (['seal'], ['write-new'], ['apply'], ['convert'], ['keep'], ['recall'], ['link'], ['fetch'],
+                    ['search'], ['sign-in']):
         from . import seal
         return seal.main(args)
     try:

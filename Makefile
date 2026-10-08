@@ -13,9 +13,9 @@ POSLIB     ?= _deps/poslib
 
 export POSLIB
 
-.PHONY: check check-ipfs test formats sealing remote signin tree differential poslib
+.PHONY: check check-ipfs test formats sealing remote search signin tree differential poslib
 
-check: test formats sealing remote signin tree differential
+check: test formats sealing remote search signin tree differential
 
 test:
 	$(PYTHON) -B test/test_archive_integrity.py
@@ -28,6 +28,9 @@ sealing: poslib
 
 remote: poslib
 	$(PYTHON) -B test/test_remote.py
+
+search: poslib
+	$(PYTHON) -B test/test_search.py
 
 signin: poslib
 	$(PYTHON) -B test/test_signin.py
