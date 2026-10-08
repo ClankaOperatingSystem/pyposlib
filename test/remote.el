@@ -22,9 +22,9 @@
 
 ;; emacs -Q --batch -L POSLIB/lisp -l remote.el REQUEST ANSWER
 ;;
-;; REQUEST holds a keeper's url and token and one event to append, with
-;; its files.  poslib's own HTTP exchange makes each call, and ANSWER
-;; gets what came back, a refusal as its kind.
+;; REQUEST holds a keeper's url and token, one event to append with its
+;; files, and a query to search for.  poslib's own HTTP exchange makes
+;; each call, and ANSWER gets what came back, a refusal as its kind.
 
 ;;; Code:
 
@@ -58,6 +58,7 @@
                          (lambda () (funcall text (pos-remote-event keeper 1)))))
               (read . ,(remote-attempt
                         (lambda () (funcall text (pos-remote-read keeper .cid .path)))))
+              (search . ,(remote-attempt (lambda () (pos-remote-search keeper .query))))
               (absent . ,(remote-attempt (lambda () (pos-remote-event keeper 2))))
               (stranger . ,(remote-attempt (lambda () (pos-remote-describe stranger)))))))))
   (let ((coding-system-for-write 'binary))
