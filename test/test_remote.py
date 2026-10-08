@@ -31,6 +31,7 @@ from pyposlib import archive_integrity as ai
 from pyposlib import cid
 from pyposlib import remote
 from pyposlib import seal
+from pyposlib import search
 
 LEDGER_ID = '0f1e2d3c-4b5a-4968-8778-a6b5c4d3e2f1'
 EMACS = os.environ.get('EMACS', 'emacs')
@@ -112,7 +113,7 @@ class Protocol(unittest.TestCase):
         keeper = remote.Keeper()
         client = over(keeper)
         self.assertEqual(dict(protocol=1, protocols=[1, 2], ledger_id=None, head=None, events=0, root=None,
-                              erased=[]),
+                              erased=[], search=dict(modes=['literal'])),
                          client.describe())
         with Scope() as scope:
             first = scope.seal('first', {'a.txt': b'first'})
@@ -340,6 +341,9 @@ class Protocol(unittest.TestCase):
                 self.assertEqual(1, client.append(name, event, files, {})['events'])
                 self.assertEqual(b'first', client.read(next(iter(files))))
                 self.assertEqual(event, client.event(1))
+                self.assertEqual([dict(ref=f'ipfs://{ai.fold_cids(scope.scope / "archives")["first"]}/a.txt',
+                                       range=dict(lines=[1, 1]), passage='first')],
+                                 client.search('irs'))
                 self.assertEqual('absent', refusal(lambda: client.event(2)))
                 self.assertEqual('access', refusal(remote.HttpRemoteArchive(url, 'wrong').describe))
             finally:
@@ -500,7 +504,8 @@ class Poslib(unittest.TestCase):
             request.write_text(json.dumps(dict(
                 url=f'http://127.0.0.1:{served.server_address[1]}', token='let-me-in', name=name,
                 event=event.decode(), files={k: v.decode() for k, v in files.items()},
-                claims=dict(tool='poslib'), cid=folded['first'], path='sub/c é.txt')), encoding='utf-8')
+                claims=dict(tool='poslib'), cid=folded['first'], path='sub/c é.txt', query='ét')),
+                encoding='utf-8')
             try:
                 result = subprocess.run([EMACS, '-Q', '--batch', '-L', str(POSLIB / 'lisp'),
                                          '-l', str(HERE / 'remote.el'), str(request), str(answer)],
@@ -514,8 +519,154 @@ class Poslib(unittest.TestCase):
             self.assertEqual(keeper.describe(), got['described'])
             self.assertEqual(dict(tool='poslib'), keeper.claims[0])
             self.assertEqual((event.decode(), 'été'), (got['event'], got['read']))
+            self.assertEqual(dict(hits=keeper.search('ét')), got['search'])
+            self.assertEqual(f'ipfs://{folded["first"]}/sub/c é.txt', got['search']['hits'][0]['ref'])
             self.assertEqual((dict(refused='absent'), dict(refused='access')),
                              (got['absent'], got['stranger']))
+
+
+class Search(unittest.TestCase):
+    """Section 12: where a query is found, from the keeper over the blocks it
+    holds, and the matching every adapter shares."""
+
+    def kept(self, scope):
+        """A keeper with three items sealed and sent: text of several lines,
+        a file that is not UTF-8, one file's bytes under two paths."""
+        keeper = remote.Keeper()
+        client = over(keeper)
+        for item, files in (('first', {'a.txt': b'alpha\nbeta alpha\n', 'sub/b.txt': b'gamma',
+                                       'raw.bin': b'\xff\xfealpha'}),
+                            ('second', {'c.txt': b'alpha'}),
+                            ('third', {'x.txt': b'alpha', 'y.txt': b'alpha'})):
+            client.append(*scope.seal(item, files), {})
+        return keeper, client, ai.fold_cids(scope.scope / 'archives')
+
+    def assertConfirmed(self, client, hits):
+        """The trust invariant: read of each hit's ref at its range gives its passage."""
+        for hit in hits:
+            match = seal.LINK.fullmatch(hit['ref'])
+            lines = search.lines_of(client.read(match[1], match[2] or ''))
+            first, last = hit['range']['lines']
+            self.assertEqual(hit['passage'], '\n'.join(lines[first - 1:last]))
+
+    def test_a_literal_search_finds_each_line_by_its_item_s_link(self):
+        """A hit for each line the query occurs in, in the archive's order by
+        path then line, naming the file by its item's CID and the path beneath;
+        the same bytes under two paths hit at each; a file that is not UTF-8
+        gives none; and each passage is what read gives at its range."""
+        with Scope() as scope:
+            keeper, client, folded = self.kept(scope)
+            hits = client.search('alpha')
+            self.assertEqual([(f'ipfs://{folded["first"]}/a.txt', [1, 1], 'alpha'),
+                              (f'ipfs://{folded["first"]}/a.txt', [2, 2], 'beta alpha'),
+                              (f'ipfs://{folded["second"]}/c.txt', [1, 1], 'alpha'),
+                              (f'ipfs://{folded["third"]}/x.txt', [1, 1], 'alpha'),
+                              (f'ipfs://{folded["third"]}/y.txt', [1, 1], 'alpha')],
+                             [(h['ref'], h['range']['lines'], h['passage']) for h in hits])
+            self.assertEqual({'ref', 'range', 'passage'}, set(hits[0]))
+            self.assertConfirmed(client, hits)
+            self.assertEqual([], client.search('delta'))
+            self.assertEqual(['gamma'], [h['passage'] for h in client.search('gam')])
+
+    def test_a_limit_keeps_the_first_hits_and_within_searches_beneath_a_cid(self):
+        """limit cuts the list where it stands; within an item, a file or the
+        root searches that alone; a CID the ledger does not enrol is absent."""
+        with Scope() as scope:
+            keeper, client, folded = self.kept(scope)
+            self.assertEqual(['alpha', 'beta alpha'], [h['passage'] for h in client.search('alpha', limit=2)])
+            self.assertEqual([f'ipfs://{folded["second"]}/c.txt'],
+                             [h['ref'] for h in client.search('alpha', within=folded['second'])])
+            self.assertEqual([[1, 1], [2, 2]],
+                             [h['range']['lines'] for h in client.search('alpha', within=folded['first/a.txt'])])
+            self.assertEqual(5, len(client.search('alpha', within=folded['.'])))
+            self.assertEqual(1, len(client.search('alpha', within=folded['.'], limit=1)))
+            self.assertEqual('absent', refusal(lambda: client.search('alpha', within=cid.cid_bytes(b'never'))))
+
+    def test_a_mode_is_served_as_declared(self):
+        """literal alone by default, and regex is refused as mode; a keeper
+        declaring regex answers it, and an expression that does not parse is
+        refused as request."""
+        with Scope() as scope:
+            keeper, client, folded = self.kept(scope)
+            self.assertEqual(dict(modes=['literal']), client.describe()['search'])
+            self.assertEqual('mode', refusal(lambda: client.search('al.ha', mode='regex')))
+            self.assertEqual('mode', refusal(lambda: client.search('alpha', mode='semantic')))
+            keeper.modes = ('literal', 'regex')
+            self.assertEqual(dict(modes=['literal', 'regex']), client.describe()['search'])
+            self.assertEqual(['beta alpha', 'gamma'],
+                             [h['passage'] for h in client.search('^[bg]', mode='regex')])
+            self.assertEqual('request', refusal(lambda: client.search('(', mode='regex')))
+
+    def test_what_is_asked_is_checked(self):
+        """No q, an empty q, a limit that is not a positive integer: request,
+        at the port and on the wire."""
+        with Scope() as scope:
+            keeper, client, folded = self.kept(scope)
+            self.assertEqual('request', refusal(lambda: client.search('')))
+            self.assertEqual('request', refusal(lambda: client.search('alpha', limit=0)))
+            self.assertEqual('request', refusal(lambda: client.search('alpha', limit=True)))
+            for path in ('/search', '/search?mode=literal', '/search?q=', '/search?q=alpha&limit=abc',
+                         '/search?q=alpha&limit=0', '/search?q=alpha&limit=-1'):
+                status, _, answer = remote.handle(keeper, 'GET', path, {}, None)
+                self.assertEqual((422, 'request'), (status, json.loads(answer)['refused']), path)
+
+    def test_the_query_travels_percent_encoded_and_a_plus_is_a_plus(self):
+        """A space goes as %20 and comes back a space; a plus is sent as %2B
+        and comes back a plus; mode, limit and within follow q in order and
+        only where given."""
+        with Scope() as scope:
+            keeper, client, folded = self.kept(scope)
+            sent = []
+
+            def send(method, url, headers, body):
+                sent.append(url)
+                status, _, answer = remote.handle(keeper, method, url[len('https://k.example'):], headers, body)
+                return status, answer
+            asking = remote.HttpRemoteArchive('https://k.example', 'tape-token', send)
+            self.assertEqual(['beta alpha'], [h['passage'] for h in asking.search('beta alpha')])
+            self.assertEqual([], asking.search('a+b', limit=3, within=folded['.']))
+            self.assertEqual(['https://k.example/search?q=beta%20alpha',
+                              f'https://k.example/search?q=a%2Bb&limit=3&within={folded["."]}'], sent)
+            client.append(*scope.seal('fourth', {'plus.txt': b'a+b'}), {})
+            self.assertEqual(['a+b'], [h['passage'] for h in asking.search('a+b')])
+
+    def test_an_erased_file_and_a_keeper_that_does_not_search_give_nothing(self):
+        """Erased bytes are not searched, and the rest still are; a keeper
+        given no modes describes no search and refuses the operation as
+        absent, which the wire answers 404."""
+        with Scope() as scope:
+            keeper, client, folded = self.kept(scope)
+            keeper.erase(folded['second/c.txt'], '2026-10-08')
+            self.assertEqual([f'ipfs://{folded["first"]}/a.txt'] * 2,
+                             [h['ref'] for h in client.search('alpha')])
+            silent = remote.Keeper(modes=())
+            self.assertNotIn('search', silent.describe())
+            self.assertEqual('absent', refusal(lambda: over(silent).search('alpha')))
+            self.assertEqual(404, remote.handle(silent, 'GET', '/search?q=alpha', {}, None)[0])
+
+    def test_the_matching_is_the_protocol_s(self):
+        """Lines split at LF with the last terminator making no line, CR kept;
+        a file that is not UTF-8 has no lines; a reference names the item,
+        else the collection, else the file; beneath takes a file, a
+        directory or the root."""
+        self.assertEqual(['a', 'b'], search.lines_of(b'a\nb\n'))
+        self.assertEqual(['a', 'b'], search.lines_of(b'a\nb'))
+        self.assertEqual(['a\r', ''], search.lines_of(b'a\r\n\n'))
+        self.assertEqual([], search.lines_of(b''))
+        self.assertIsNone(search.lines_of(b'\xff'))
+        cids = {'.': 'root', 'item': 'i', 'item/a.txt': 'a', 'item/coll': 'c', 'item/coll/b.txt': 'b',
+                'coll': 'k', 'coll/c.txt': 'cc', 'lone.txt': 'l'}
+        self.assertEqual('ipfs://i/a.txt', search.reference('item/a.txt', cids, ['item'], ['item/coll']))
+        self.assertEqual('ipfs://i/coll/b.txt', search.reference('item/coll/b.txt', cids, ['item'], ['item/coll']))
+        self.assertEqual('ipfs://k/c.txt', search.reference('coll/c.txt', cids, ['item'], ['coll']))
+        self.assertEqual('ipfs://l', search.reference('lone.txt', cids, ['item'], ['coll']))
+        beneath = search.beneath(cids, 'c')
+        self.assertEqual([False, True, False], [beneath(p) for p in ('item/a.txt', 'item/coll/b.txt', 'coll/c.txt')])
+        self.assertTrue(all(search.beneath(cids, 'root')(p) for p in cids))
+        self.assertEqual([True, False], [search.beneath(cids, 'a')(p) for p in ('item/a.txt', 'item/coll/b.txt')])
+        self.assertEqual('absent', refusal(lambda: search.beneath(cids, 'nowhere')))
+        self.assertEqual([dict(ref='r', range=dict(lines=[2, 2]), passage='xy')],
+                         list(search.hits_in(b'a\nxy\n', 'r', lambda line: 'y' in line)))
 
 
 def call(client, spec):
@@ -531,6 +682,8 @@ def call(client, spec):
         return dict(missing=client.held(spec['cids']))
     if operation == 'put':
         return dict(held='new' if client.put(spec['cid'], spec['block'].encode()) else 'already')
+    if operation == 'search':
+        return dict(hits=client.search(spec['q'], spec.get('mode'), spec.get('limit'), spec.get('within')))
     return client.append(spec['name'], spec['event'].encode(),
                          {k: v.encode() for k, v in spec['files'].items()}, spec['claims'],
                          [(later['name'], later['event'].encode()) for later in spec.get('following', [])])
@@ -565,7 +718,8 @@ class Tapes(unittest.TestCase):
         ledger the tape says it keeps, if it says: the status recorded, and
         the body recorded, or for a refusal its kind."""
         for name, tape in fixtures('remote'):
-            keeper = remote.Keeper(tape.get('ledger_id'), protocols=tape.get('protocols', remote.VERSIONS))
+            keeper = remote.Keeper(tape.get('ledger_id'), protocols=tape.get('protocols', remote.VERSIONS),
+                                   modes=tape.get('search', ()))
             for index, exchange in enumerate(tape['exchanges']):
                 with self.subTest(f'{name} {index}'):
                     answered = {}
