@@ -182,6 +182,20 @@ class Reader(unittest.TestCase):
                 expected = fixture['refused'] if 'refused' in fixture else fixture['config']
                 self.assertEqual(read(fixture['yaml']), expected)
 
+    def test_an_exclude_entry_is_a_name_or_a_path_read_exactly(self):
+        path = tree._exclusions(['journal/', 'meta/notes/'])
+        name = ['journal', 'attic', 'tmp*', 'what?', '[draft]']
+        self.assertEqual(path, ['journal/', 'meta/notes'])
+        for walked, exclusions, kept_out in [
+                ('journal', path, True), ('journal/2026', path, True),
+                ('a/b/journal', path, False), ('meta/notes/old', path, True),
+                ('a/b/journal', name, True), ('a/attic', name, True),
+                ('a/Attic', name, False), ('tmpfiles', name, True),
+                ('a/Tmpfiles', name, False), ('what?', name, True),
+                ('whats', name, False), ('[draft]', name, True), ('d', name, False)]:
+            with self.subTest(walked=walked, exclusions=exclusions):
+                self.assertEqual(tree.unwalked(walked, exclusions), kept_out)
+
     def test_a_declaration_is_read_as_the_fixtures_say(self):
         found = fixtures('pos-methodology')
         self.assertGreater(len(found), 5)

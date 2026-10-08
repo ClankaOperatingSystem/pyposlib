@@ -53,7 +53,6 @@ import re
 import shutil
 import subprocess
 import sys
-from fnmatch import fnmatchcase
 
 import yaml
 
@@ -311,8 +310,9 @@ def _archives(entries, children, warnings):
 def _exclusions(value):
     """value, a configuration's exclude sequence, checked: each entry a
     directory's name or a glob over one, with * for any text, or a path
-    beneath the node when it holds a slash, its final slash dropped. None
-    for None."""
+    beneath the node when it holds a slash. A path's final slash is
+    dropped unless the path is one name, which keeps it: without it the
+    entry would read as a name. None for None."""
     if value is None:
         return None
     checked = []
@@ -320,7 +320,11 @@ def _exclusions(value):
         ok, _ = _typed(entry, 'string')
         if not ok:
             raise Refused('wrong-type', 'exclude: an entry is not a string')
-        checked.append(_location({'exclude': entry}, 'exclude') if '/' in entry else entry)
+        if '/' in entry:
+            path = _location({'exclude': entry}, 'exclude')
+            checked.append(path if '/' in path else path + '/')
+        else:
+            checked.append(entry)
     return checked
 
 
@@ -336,9 +340,13 @@ def unwalked(path, exclusions):
     """Whether path, relative to the node whose exclusions these are, is a
     directory they keep a walk out of. An entry with a slash names a path
     and excludes it and what lies beneath it; any other names a
-    directory, with * for any text, wherever it lies beneath the node."""
+    directory, with * for any text, wherever it lies beneath the node. A
+    name is matched letter for letter: case counts, and no character but
+    * stands for another."""
     name = path.rsplit('/', 1)[-1]
-    return any(_within(path, entry) if '/' in entry else fnmatchcase(name, entry)
+    return any(_within(path, entry.removesuffix('/')) if '/' in entry
+               else re.fullmatch('.*'.join(map(re.escape, entry.split('*'))), name,
+                                 re.DOTALL) is not None
                for entry in exclusions)
 
 
