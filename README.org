@@ -19,8 +19,10 @@ The package is =pyposlib/=:
   what a server wraps around its storage.
 - =search.py= :: where a query is found in an archive, as section 12 of
   the same document specifies: the port a reading client searches
-  through, and the matching every adapter here shares, so that a keeper
-  and an archive on disk give one answer.
+  through, the matching every adapter here shares, so that a keeper and
+  an archive on disk give one answer, the adapter over an archive on
+  disk, and the =search= command, grep's shape with a reference for the
+  path.
 - =signin.py= :: signing in to a keeper that takes OAuth 2.0 tokens, as
   section 8 of poslib's =doc/remote-archive-protocol.txt= specifies: the
   authorization code flow with PKCE to a loopback address, when a person
@@ -55,8 +57,8 @@ Install it from the repository at a tag:
 
 Commands: =seal SOURCE DESTINATION [--apply]=, =write-new DESTINATION
 [--apply]= (the record on standard input), =apply PLAN HASH=, =check ROOT=,
-=checkpoint ROOT=, =repair ROOT=, =convert ROOT=, =keep ROOT=, =recall ROOT=, =link PATH=, =fetch LINK=
-and =help=. Exit 0 done or clean, 1 findings, 2 refused.
+=checkpoint ROOT=, =repair ROOT=, =convert ROOT=, =keep ROOT=, =recall ROOT=, =link PATH=, =fetch LINK=,
+=search ROOT QUERY [--mode MODE] [--limit N] [--within CID]= and =help=. Exit 0 done or clean, 1 findings, 2 refused.
 
 * Check
 
