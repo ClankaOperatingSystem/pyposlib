@@ -369,6 +369,33 @@ class Protocol(unittest.TestCase):
 OTHER_ID = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
 
 
+class Walk(unittest.TestCase):
+    def test_a_file_is_read_beneath_a_sharded_directory(self):
+        """A directory too large for one node is a HAMT shard, whose links
+        are named by slot and whose crowded slots are shards themselves.
+        A path beneath it resolves as beneath a plain directory, whether
+        the shard is the root or lies under one; a name it does not hold,
+        and the shard itself, are nothing to read."""
+        blocks, links = {}, []
+        for number in range(7000):
+            data = b'file %d\n' % number
+            node = cid.leaf(data)
+            blocks[cid.text(node[0])] = data
+            links.append((node[0], b'entry-%05d.txt' % number, node[1]))
+        big, size = cid.directory_node(links, blocks)
+        self.assertEqual(cid.parse(blocks[cid.text(big)])[1][:2], b'\x08\x05')
+        root, _ = cid.directory_node([(big, b'many', size)], blocks)
+        for number in (0, 1, 4242, 6999):
+            name = 'entry-%05d.txt' % number
+            with self.subTest(name):
+                self.assertEqual(remote.walk(blocks, cid.text(big), [name]), b'file %d\n' % number)
+                self.assertEqual(remote.walk(blocks, cid.text(root), ['many', name]),
+                                 b'file %d\n' % number)
+        for parts in (['entry-07000.txt'], ['00'], []):
+            with self.subTest(parts=parts), self.assertRaises(KeyError):
+                remote.walk(blocks, cid.text(big), parts)
+
+
 class Identity(unittest.TestCase):
     """Whose an event is: a keeper told which ledger it keeps takes no
     event of another, and an event that names no ledger only with the
