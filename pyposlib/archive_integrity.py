@@ -43,7 +43,7 @@ INTEGRITY = 'archive-integrity'  # beside an archive: ledger/ and checkpoints/
 META = '.archive-integrity'  # legacy: the ledger inside an archive
 ANCHORS = '.archive-integrity-anchors'  # legacy: checkpoints beside a root
 DECLARATION = b'#+COLLECTION: t'
-CONFIG_DIRECTORIES = ('.clanka', '.pos')  # a node's configuration directory, the one written first
+CONFIG_DIRECTORIES = ('.clanka', '.clankos', '.pos')  # a node's configuration directory, the one written first
 CONFIG_NAMES = ('config.yaml', 'config.yml')  # its configuration, within that directory
 CONFIG_PATHS = tuple(f'{directory}/{name}' for directory in CONFIG_DIRECTORIES for name in CONFIG_NAMES)
 

@@ -16,7 +16,7 @@
 """A node's configuration, as poslib's doc/pos-directory.txt specifies.
 
 A node is a repository or a directory of one. Its configuration is in
-.clanka or .pos, as config.yaml or config.yml, and declares what kind of
+.clanka, .clankos or .pos, as config.yaml or config.yml, and declares what kind of
 node it is, what is beneath it, its other working trees, where its
 scopes' archives are kept and the server it is bound to. Two steps bring
 a tree to what its files declare.
