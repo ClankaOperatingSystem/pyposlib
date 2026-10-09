@@ -386,9 +386,9 @@ class Trees(unittest.TestCase):
     def test_an_undeclared_repository_is_found(self):
         root = repository(self.path('root'), {'README': 'root\n'})
         repository(self.path('root/projects/a'))
-        repository(self.path('root/responsibilities/plain/projects/b'))
+        repository(self.path('root/plain/projects/b'))
         self.assertEqual(summary(self.plan(root)),
-                         ['undeclared projects/a', 'undeclared responsibilities/plain/projects/b'])
+                         ['undeclared plain/projects/b', 'undeclared projects/a'])
 
     def test_a_childs_config_is_read_as_committed(self):
         origin = repository(self.path('origins/child'), {'README': 'child\n'})
@@ -548,15 +548,15 @@ class Trees(unittest.TestCase):
         git(origin, 'switch', '-q', '-c', 'feature')
         commit(origin, {'FEATURE': 'on the branch\n'})
         git(origin, 'switch', '-q', 'master')
-        files = config(child('responsibilities/it', origin))
+        files = config(child('it', origin))
         files['.pos/config.yaml'] += ('worktrees:\n'
                                       '  - path: projects/fix/_worktrees/do-the-thing\n'
-                                      '    of: responsibilities/it\n    branch: do-the-thing\n'
+                                      '    of: it\n    branch: do-the-thing\n'
                                       '  - path: _worktrees/feature\n'
-                                      '    of: responsibilities/it\n    branch: feature\n')
+                                      '    of: it\n    branch: feature\n')
         root = repository(self.path('root'), files)
         self.assertEqual(summary(self.plan(root)),
-                         ['exclude . responsibilities/it', 'clone responsibilities/it',
+                         ['exclude . it', 'clone it',
                           'exclude . _worktrees/feature', 'clone _worktrees/feature',
                           'exclude . projects/fix/_worktrees/do-the-thing',
                           'clone projects/fix/_worktrees/do-the-thing'])
@@ -624,9 +624,9 @@ class Trees(unittest.TestCase):
         middle = repository(self.path('origins/child'),
                             {'.clanka/config.yml': text(child('products/product', product))})
         root = repository(self.path('root'),
-                          {'.clanka/config.yml': text(child('responsibilities/child', middle)) + 'bin: bin\n'})
+                          {'.clanka/config.yml': text(child('child', middle)) + 'bin: bin\n'})
         self.assertEqual(summary(self.settle(root, given)), [])
-        in_child = self.path('root/responsibilities/child')
+        in_child = self.path('root/child')
         in_product = os.path.join(in_child, 'products/product')
         for directory in (root, in_child):
             self.assertEqual(Path(directory, '.clanka/auto/version').read_text(), '1\n')
