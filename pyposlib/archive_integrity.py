@@ -924,7 +924,9 @@ USAGE = """Usage: COMMAND ...  (help prints this; Emacs itself takes --help)
   write-new DESTINATION [--apply]
       print the plan to seal a new record, read from standard input
   apply PLAN HASH
-      apply a reviewed plan, named by its hash
+      apply a reviewed plan; PLAN is a file holding the plan exactly
+      as seal or write-new printed it, and HASH is the SHA-256 of that
+      file's bytes in lower-case hex, as sha256sum PLAN prints it
   check ROOT
       report every archive under ROOT, as JSON
   checkpoint ROOT
