@@ -311,6 +311,22 @@ class Sealing(unittest.TestCase):
             self.assertFalse(staged.exists())
             self.assertEqual((scope / 'archives/journal/h.txt').read_bytes(), b'handover\n')
 
+    def test_a_new_record_staged_again_replaces_the_first(self):
+        """Staging for one destination twice leaves one staged file, the
+        second's. The first plan is refused, the second seals, and _seal is
+        gone."""
+        with Scope() as scope:
+            target = scope / 'archives' / 'journal' / 'h.txt'
+            first = seal.stage(b'draft\n', target)
+            second = seal.stage(b'handover\n', target)
+            self.assertEqual(first['source'], second['source'])
+            self.assertEqual(len(os.listdir(scope / '_seal')), 1)
+            with self.assertRaises(ai.Refused) as refused:
+                seal.apply(first, ai.sha(ai.encoded(first)))
+            self.assertEqual(refused.exception.kind, 'plan')
+            seal.apply(second, ai.sha(ai.encoded(second)))
+            self.assertEqual(target.read_bytes(), b'handover\n')
+            self.assertFalse((scope / '_seal').exists())
 
     def test_a_new_record_may_start_an_archive(self):
         with Scope() as scope:
@@ -339,6 +355,7 @@ class Sealing(unittest.TestCase):
             self.assertEqual(0, subprocess.run(command + ['--apply'], input=b'handover\n',
                                                capture_output=True).returncode)
             self.assertEqual(target.read_bytes(), b'handover\n')
+            self.assertFalse((scope / '_seal').exists())
 
     def test_a_staging_directory_left_empty_is_not_sealed(self):
         """An empty _seal in an item, at any depth, is removed and no event
