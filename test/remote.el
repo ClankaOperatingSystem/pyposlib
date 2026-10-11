@@ -64,6 +64,6 @@
   (let ((coding-system-for-write 'binary))
     (with-temp-file (cadr command-line-args-left)
       (set-buffer-multibyte nil)
-      (insert (pos-ledger-json answers)))))
+      (insert (pos-bytes-json answers)))))
 
 ;;; remote.el ends here
