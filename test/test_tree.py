@@ -401,14 +401,14 @@ class Trees(unittest.TestCase):
     def test_a_refused_config_is_found_and_nothing_beneath_planned(self):
         """A configuration the reader refuses is a finding, and nothing is
         planned in that repository or beneath it."""
-        both = 'pos: 2\nprojects: p/\nmethodologies: m/\n'
+        both = 'pos: 2\nprojects: m/p/\nmethodologies: m/\n'
         origin = repository(self.path('origins/child'), {'.pos/config.yaml': both, **skill('c')})
         root = repository(self.path('root'), {**config(child('projects/child', origin)), **skill('r')})
         settled = self.settle(root)
         self.assertEqual([line for line in summary(settled) if 'child' in line],
                          ['config-refused projects/child'])
         self.assertEqual(settled['findings'][0]['detail'],
-                         'bad-value: A node says where its projects belong or its methodologies, not both')
+                         'bad-path: Projects and methodologies belong at separate paths: m')
         write(root, '.pos/config.yaml', both)
         self.assertEqual(summary(self.plan(root)), ['config-refused .'])
 
@@ -482,12 +482,12 @@ class Trees(unittest.TestCase):
         self.assertEqual(summary(self.settle(root)), [])
         self.assertTrue(os.path.exists(self.path('root/child/deeper/README')))
 
-    def test_a_node_that_names_neither_location_is_unconfigured(self):
-        """It is found, and what it declares is planned all the same."""
+    def test_a_node_that_names_neither_location_is_planned(self):
+        """What it declares is planned, and nothing is found."""
         origin = repository(self.path('origins/child'), {'README': 'child\n'})
         root = repository(self.path('root'), {'README': 'root\n'})
         write(root, '.clanka/config.yaml', 'pos: 2\nchildren:\n' + child('work', origin))
-        self.assertEqual(summary(self.plan(root)), ['exclude . work', 'clone work', 'archive-excludes .', 'unconfigured .'])
+        self.assertEqual(summary(self.plan(root)), ['exclude . work', 'clone work', 'archive-excludes .'])
 
     def test_a_child_with_no_remote_is_a_directory(self):
         """The directory itself is not excluded or cloned; one that is not there is
@@ -930,6 +930,42 @@ class Trees(unittest.TestCase):
         root = repository(self.path('root'), {
             '.clanka/config.yml': project(child('methodologies/clankos', 'git@example.org:clankos.git'))})
         self.assertEqual(summary(self.plan(root)), ['config-refused .'])
+
+    def test_a_responsibility_links_its_methodologies(self):
+        """A node that says where its projects belong may have methodologies
+        too. The root has one and so has work, a responsibility that is a
+        directory of the repository; each has its links made where it is."""
+        def both(name, *more):
+            return ('pos: 2\nprojects: projects/\nmethodologies: methodologies/\n'
+                    f'children:\n  - path: methodologies/{name}\n' + ''.join(more))
+        root = repository(self.path('root'), {
+            '.clanka/config.yml': both('tidy', '  - path: work\n'),
+            'work/.clanka/config.yml': both('trade'),
+            **beneath('methodologies/tidy', method('tidy')),
+            **beneath('work/methodologies/trade', method('trade'))})
+        self.assertEqual(summary(self.settle(root)), [])
+        self.assertEqual(names(root), ['tidy-greet'])
+        self.assertEqual(os.readlink(os.path.join(root, 'work/.agents/skills/trade-greet')),
+                         '../../methodologies/trade/skills/trade-greet')
+
+    def test_a_skill_named_as_another_above_it_is_found(self):
+        """Two skills of one name along a line of directories are found. A
+        coding agent shows a session the skills of each directory above it in
+        the repository. Here work/desk has a skill tidy that is not the
+        root's, and one greet that is the root's text exactly; work/shelf has
+        none of either name, and a mounted child is another repository."""
+        def own(prefix, name, text):
+            return {f'{prefix}.agents/skills/{name}/SKILL.md': text}
+        origin = repository(self.path('origins/child'),
+                            {'.clanka/config.yml': 'pos: 2\n', **own('', 'tidy', "The child's.\n")})
+        root = repository(self.path('root'), {
+            **config(child('mounted', origin)),
+            **own('', 'tidy', "The root's.\n"), **own('', 'greet', 'Hello.\n'),
+            **own('work/desk/', 'tidy', "The desk's.\n"), **own('work/desk/', 'greet', 'Hello.\n'),
+            **own('work/shelf/', 'sort', "The shelf's.\n")})
+        made = self.settle(root)
+        self.assertEqual(summary(made), ['name-repeated work/desk/.agents/skills/tidy'])
+        self.assertEqual(made['findings'][0]['detail'], '.agents/skills/tidy')
 
     def test_two_methodologies_supplying_one_name_are_found(self):
         """Where two methodologies supply one command, the first is linked.

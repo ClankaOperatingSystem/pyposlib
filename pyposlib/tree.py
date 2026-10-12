@@ -16,15 +16,16 @@
 """A node's configuration, as poslib's doc/pos-directory.txt specifies.
 
 A node is a repository or a directory of one. Its configuration is in
-.clanka, .clankos or .pos, as config.yaml or config.yml, and declares what kind of
-node it is, what is beneath it, its other working trees, where its
-scopes' archives are kept and the server it is bound to. Two steps bring
+.clanka, .clankos or .pos, as config.yaml or config.yml, and declares
+what is beneath it, its other working trees, where its scopes' archives
+are kept and the server it is bound to. Where a node lies says whether it
+is a project or a responsibility; its configuration does not. Two steps bring
 a tree to what its files declare.
 
 What is installed comes from a source the tool is given, a directory of
 skills and commands. It is copied into auto/ in the configuration
 directory of each repository that has a configuration, and links to it
-are made where a coding agent and a person look. A project's
+are made where a coding agent and a person look. A node's
 methodologies, the children directly beneath its methodologies path,
 supply skills and commands the same way, by links to them where they
 lie, with nothing copied. Nothing is written in a repository with no
@@ -352,14 +353,12 @@ def unwalked(path, exclusions):
 
 def read_config(text):
     """The configuration in text, a config.yaml's, checked: a dict of
-    kind, projects, methodologies, image and bin, each a string or None;
+    projects, methodologies, image and bin, each a string or None;
     exclude, a list of strings or None; children, worktrees and archives,
     each a list with its defaults filled in; server, a dict or None; and
     warnings, a list of strings, one for each key this reader does not
-    know, which it leaves unread. kind is 'responsibility' for a
-    node that says where its projects belong, 'project' for one that says
-    where its methodologies belong, and None for one that says neither,
-    which is yet to be configured. Every scalar is read as the text
+    know, which it leaves unread. The file does not say what its node is:
+    where the node lies does. Every scalar is read as the text
     written, and the keys' kinds decide what it is. Raises Refused, of a
     kind doc/pos-directory.txt names, for a file it does not allow."""
     try:
@@ -382,17 +381,16 @@ def read_config(text):
     projects, methodologies = _location(top, 'projects'), _location(top, 'methodologies')
     image = top.get('image')
     children = _children(top.get('children', []), warnings)
-    if projects is not None and methodologies is not None:
-        raise Refused('bad-value', 'A node says where its projects belong or its methodologies, not both')
+    if (projects is not None and methodologies is not None
+            and (_within(projects, methodologies) or _within(methodologies, projects))):
+        raise Refused('bad-path', f'Projects and methodologies belong at separate paths: {methodologies}')
     if methodologies is not None:
         _check_methodologies(methodologies, children)
     # A tool with no YAML reader finds the image by its line.
     if image is not None and not (_IMAGE.fullmatch(image)
                                   and re.search(f'^image: {re.escape(image)}$', text, re.MULTILINE)):
         raise Refused('bad-value', 'The image is not on one line, as image: NAME, unquoted')
-    return {'kind': ('responsibility' if projects is not None
-                     else 'project' if methodologies is not None else None),
-            'projects': projects, 'methodologies': methodologies, 'image': image,
+    return {'projects': projects, 'methodologies': methodologies, 'image': image,
             'bin': _location(top, 'bin'),
             'exclude': _exclusions(top.get('exclude')),
             'children': children,
@@ -659,7 +657,17 @@ class _Plan:
         if not _excluded(directory, path):
             self.act('exclude', repository=self.rel(directory), path=path)
 
-    def undeclared(self, repo, mounted, local, excluded, prefix='', node=''):
+    def repeated(self, here, above):
+        """Find each skill of here with the name of another in above, each
+        a dict as _skills_in gives it. Two with one name and one text are
+        the same skill, and are not found."""
+        for name, file in here.items():
+            other = above.get(name)
+            if other is not None and _read(file) != _read(other):
+                self.find('name-repeated', self.rel(os.path.dirname(file)),
+                          self.rel(os.path.dirname(other)))
+
+    def undeclared(self, repo, mounted, local, excluded, prefix='', node='', above=None, skills=False):
         """Find what is beneath the repository at repo that no entry
         declares: a repository, and a directory holding a configuration.
         mounted are the declared paths of repositories, which are not
@@ -668,7 +676,17 @@ class _Plan:
         excluded are the exclusions in force, declared by the node at
         node, a prefix with its final slash or '' for repo; a local node
         that declares its own replaces them beneath it. prefix is the
-        directory being looked in, with its final slash."""
+        directory being looked in, with its final slash.
+
+        With skills, for a repository that has a configuration, find as
+        well each skill of a directory that has the name of another skill
+        in a directory above it (name-repeated). above are the skills of
+        the directories above prefix in the repository."""
+        above = above or {}
+        if skills:
+            here = _skills_in(os.path.join(repo, prefix))
+            self.repeated(here, above)
+            above = {**above, **here}
         for name in sorted(os.listdir(os.path.join(repo, prefix))):
             path = prefix + name
             full = os.path.join(repo, path)
@@ -679,7 +697,7 @@ class _Plan:
             if path in local:
                 own = local[path]
                 self.undeclared(repo, mounted, local, excluded if own is None else own,
-                                path + '/', node if own is None else path + '/')
+                                path + '/', node if own is None else path + '/', above, skills)
             # A submodule is the repository's own, tracked and declared by git.
             elif _is_repository(full):
                 if not _tracked(repo, path):
@@ -687,7 +705,7 @@ class _Plan:
             elif config_files(full):
                 self.find('undeclared', self.rel(full), 'a configuration')
             else:
-                self.undeclared(repo, mounted, local, excluded, path + '/', node)
+                self.undeclared(repo, mounted, local, excluded, path + '/', node, above, skills)
 
     def declared(self, repo, base, config, mounted, local, locals):
         """Plan what config declares, the configuration of the node at
@@ -701,8 +719,6 @@ class _Plan:
         added to locals with it, as (directory, config)."""
         nodes, held = [], []
         self.archives(repo, base, config)
-        if config['kind'] is None:
-            self.find('unconfigured', self.rel(base))
         for child in sorted(config['children'], key=lambda child: child['path']):
             path = os.path.join(base, child['path'])
             within = os.path.relpath(path, repo)
@@ -777,7 +793,7 @@ class _Plan:
         mounted, local, locals = [], {}, []
         nodes, held = (self.declared(directory, directory, config, mounted, local, locals)
                        if config else ([], []))
-        self.undeclared(directory, mounted, local, exclusions(config))
+        self.undeclared(directory, mounted, local, exclusions(config), skills=bool(config))
         if config:
             self.archive_excludes(directory)
         return _Node(directory, config, nodes, held, locals)
@@ -888,7 +904,7 @@ class _Plan:
         return skills, commands
 
     def in_directory(self, directory, base, config):
-        """Plan the links to the methodologies of the project at base, a
+        """Plan the links to the methodologies of the node at base, a
         directory of the repository at directory, with config its own."""
         if config['methodologies'] is None:
             return
@@ -905,7 +921,7 @@ class _Plan:
         it. A repository with a configuration has auto/ in its configuration
         directory, replaced from the source when its version is another, and
         links to what auto/ holds and to what its methodologies supply. A
-        project that is a directory of it has links to its own
+        node that is a directory of it has links to its own
         methodologies. One with no configuration, a product, has nothing
         planned in it but the removal of links an earlier tool made."""
         directory = node.directory
@@ -950,6 +966,22 @@ class _Plan:
                 and parent.endswith('/.agents/skills')
                 and parent != skills
                 and not _tracked(directory, '.agents/skills/' + name))
+
+
+def _skills_in(directory):
+    """The skills of directory, a dict of name and file: each entry of its
+    .agents/skills that holds a SKILL.md, a link to one among them, with
+    that SKILL.md."""
+    inside = os.path.join(directory, '.agents', 'skills')
+    if not os.path.isdir(inside):
+        return {}
+    return {name: os.path.join(inside, name, 'SKILL.md') for name in sorted(os.listdir(inside))
+            if os.path.isfile(os.path.join(inside, name, 'SKILL.md'))}
+
+
+def _read(file):
+    with open(file, 'rb') as handle:
+        return handle.read()
 
 
 def _through_link(directory, path):
@@ -1010,7 +1042,7 @@ def _auto(directory):
 def _own_link(link, owned):
     """Whether link is a symbolic link whose target is in one of owned, the
     directories the tool's links point into: auto/, and the methodologies
-    of a project."""
+    of a node."""
     if not os.path.islink(link):
         return False
     target = os.path.normpath(os.path.join(os.path.dirname(link), os.readlink(link)))
