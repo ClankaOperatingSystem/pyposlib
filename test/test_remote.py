@@ -533,8 +533,11 @@ class Poslib(unittest.TestCase):
                 event=event.decode(), files={k: v.decode() for k, v in files.items()},
                 claims=dict(tool='poslib'), cid=folded['first'], path='sub/c é.txt', query='ét')),
                 encoding='utf-8')
+            # poslib's make deps fetches its dependencies into its _deps/.
+            packages = [arg for name in ('markdown-mode', 'yaml')
+                        for arg in ('-L', str(POSLIB.resolve() / '_deps' / name))]
             try:
-                result = subprocess.run([EMACS, '-Q', '--batch', '-L', str(POSLIB / 'lisp'),
+                result = subprocess.run([EMACS, '-Q', '--batch', *packages, '-L', str(POSLIB / 'lisp'),
                                          '-l', str(HERE / 'remote.el'), str(request), str(answer)],
                                         capture_output=True, text=True)
             finally:
