@@ -154,6 +154,8 @@ def _typed(value, kind):
         return False, None
     if kind == 'sequence':
         return isinstance(value, list), value
+    if kind == 'path-or-sequence':
+        return _typed(value, 'string')[0] or isinstance(value, list), value
     return _is_mapping(value), value
 
 
@@ -210,10 +212,104 @@ def methodologies(config):
     methodologies belong at; its name is the last part of its path, which
     is relative to the node. None for a node that is no project."""
     at = config['methodologies']
-    if at is None:
+    if not isinstance(at, str):
         return []
     return sorted((child['path'][len(at) + 1:], child['path'])
                   for child in config['children'] if _within(child['path'], at))
+
+
+# A skill's name: words of lower-case letters and digits joined by single
+# hyphens, as the Agent Skills specification has it.
+SKILL_NAME = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*')
+_GIT_URL = re.compile(r'(?:[A-Za-z][A-Za-z0-9+.-]*://[^/ ]+/|[^@/: ]+@[^@/: ]+:)[^ ]+')
+_HARNESS = re.compile(r'[a-z0-9][a-z0-9-]*')
+
+
+def source_name(source):
+    """The name of source, a git URL: the last part of its path, once a
+    final slash and then a final .git are dropped."""
+    path = source.removesuffix('/')
+    return re.split('/' if is_url(path) else '[/:]', path)[-1].removesuffix('.git')
+
+
+def source_key(source):
+    """source, a git URL, as it is compared with another: less a final
+    slash, then a final .git, and then a beginning https://github.com/,
+    which the skills CLI drops in its lock file."""
+    return source.removesuffix('/').removesuffix('.git').removeprefix('https://github.com/')
+
+
+def _once(values, what):
+    seen = set()
+    for value in values:
+        if value in seen:
+            raise Refused('bad-value', f'{what} is named twice: {value}')
+        seen.add(value)
+
+
+def _source(entry, index, warnings):
+    """entry, the source at index in methodologies, checked."""
+    checked = _mapping(entry, 'A source', [('source', 'string', True), ('ref', 'string', True),
+                                           ('skills', 'sequence', False), ('kind', 'string', False)],
+                       warnings, f'methodologies[{index}]')
+    source, ref = checked['source'], checked['ref']
+    kind = checked.get('kind', 'methodology')
+    name = source_name(source) if kind == 'methodology' else None
+    skills = checked.get('skills')
+    if skills is not None:
+        for skill in skills:
+            if not _typed(skill, 'string')[0]:
+                raise Refused('wrong-type', f'A skill is not a string: {source}')
+    if source.startswith('-') or not _GIT_URL.fullmatch(source):
+        raise Refused('bad-value', f'Not a git URL: {source}')
+    if ref.startswith('-') or re.search(r'[ \t\n#@]', ref):
+        raise Refused('bad-value', f'Not a ref: {ref}')
+    if kind not in ('methodology', 'skills-repository'):
+        raise Refused('bad-value', f'A source\'s kind is methodology or skills-repository: {kind}')
+    if name is not None and (not SKILL_NAME.fullmatch(name) or name == 'clankos'):
+        raise Refused('bad-value', f'Not a methodology\'s name: {name}')
+    if skills is not None and not skills:
+        raise Refused('bad-value', f'A source names no skills: {source}')
+    for skill in skills or []:
+        if not SKILL_NAME.fullmatch(skill):
+            raise Refused('bad-value', f'Not a skill\'s name: {skill}')
+        if name is not None and not skill.startswith(name + '-'):
+            raise Refused('bad-value', f'A skill of {name} not named {name}-NAME: {skill}')
+    _once(skills or [], 'A skill')
+    return {'source': source, 'ref': ref, 'skills': skills, 'kind': kind, 'name': name}
+
+
+def _sources(entries, warnings):
+    """The sources in entries, a sequence, checked."""
+    sources = [_source(entry, index, warnings) for index, entry in enumerate(entries)]
+    keys, names, skills = set(), set(), set()
+    for source in sources:
+        key = source_key(source['source'])
+        if key in keys:
+            raise Refused('bad-value', f'A source is declared twice: {source["source"]}')
+        keys.add(key)
+        if source['name'] is not None:
+            if source['name'] in names:
+                raise Refused('bad-value', f'Two methodologies are named {source["name"]}')
+            names.add(source['name'])
+        for skill in source['skills'] or []:
+            if skill in skills:
+                raise Refused('bad-value', f'A skill is named by two sources: {skill}')
+            skills.add(skill)
+    return sources
+
+
+def _harnesses(value):
+    """value, a configuration's harnesses sequence, checked; None for None."""
+    if value is None:
+        return None
+    for name in value:
+        if not _typed(name, 'string')[0]:
+            raise Refused('wrong-type', 'harnesses: an entry is not a string')
+        if not _HARNESS.fullmatch(name):
+            raise Refused('bad-value', f'Not a harness\'s name: {name}')
+    _once(value, 'A harness')
+    return value
 
 
 def _own_scope(path, children, what):
@@ -357,11 +453,13 @@ def unwalked(path, exclusions):
 
 def read_config(text):
     """The configuration in text, a config.yaml's, checked: a dict of
-    projects, methodologies, image and bin, each a string or None;
-    exclude, a list of strings or None; children, worktrees and archives,
-    each a list with its defaults filled in; server, a dict or None; and
-    warnings, a list of strings, one for each key this reader does not
-    know, which it leaves unread. The file does not say what its node is:
+    projects, image and bin, each a string or None; methodologies, a path,
+    a list of sources, each a dict of source, ref, skills, kind and name,
+    or None; harnesses and exclude, each a list of strings or None;
+    children, worktrees and archives, each a list with its defaults filled
+    in; server, a dict or None; and warnings, a list of strings, one for
+    each key this reader does not know, which it leaves unread, and one
+    for methodologies written as a path. The file does not say what its node is:
     where the node lies does. Every scalar is read as the text
     written, and the keys' kinds decide what it is. Raises Refused, of a
     kind doc/pos-directory.txt names, for a file it does not allow."""
@@ -378,12 +476,19 @@ def read_config(text):
         raise Refused('unknown-version', f'Not a version this reader knows: {version}')
     warnings = []
     top = _mapping(parsed, 'The file', [('pos', 'integer', True), ('projects', 'string', False),
-                                        ('methodologies', 'string', False), ('image', 'string', False),
+                                        ('methodologies', 'path-or-sequence', False),
+                                        ('harnesses', 'sequence', False), ('image', 'string', False),
                                         ('bin', 'string', False), ('exclude', 'sequence', False), ('children', 'sequence', False),
                                         ('worktrees', 'sequence', False), ('archives', 'sequence', False),
                                         ('server', 'mapping', False)], warnings)
-    projects, methodologies = _location(top, 'projects'), _location(top, 'methodologies')
+    projects = _location(top, 'projects')
+    declared = top.get('methodologies')
+    methodologies = _location(top, 'methodologies') if isinstance(declared, str) else None
+    sources = _sources(declared, warnings) if isinstance(declared, list) else None
+    harnesses = _harnesses(top.get('harnesses'))
     image = top.get('image')
+    if methodologies is not None:
+        warnings.append(f'methodologies-path: {methodologies}')
     children = _children(top.get('children', []), warnings)
     if (projects is not None and methodologies is not None
             and (_within(projects, methodologies) or _within(methodologies, projects))):
@@ -394,7 +499,9 @@ def read_config(text):
     if image is not None and not (_IMAGE.fullmatch(image)
                                   and re.search(f'^image: {re.escape(image)}$', text, re.MULTILINE)):
         raise Refused('bad-value', 'The image is not on one line, as image: NAME, unquoted')
-    return {'projects': projects, 'methodologies': methodologies, 'image': image,
+    return {'projects': projects,
+            'methodologies': methodologies if methodologies is not None else sources,
+            'harnesses': harnesses, 'image': image,
             'bin': _location(top, 'bin'),
             'exclude': _exclusions(top.get('exclude')),
             'children': children,
@@ -914,7 +1021,7 @@ class _Plan:
     def in_directory(self, directory, base, config):
         """Plan the links to the methodologies of the node at base, a
         directory of the repository at directory, with config its own."""
-        if config['methodologies'] is None:
+        if not isinstance(config['methodologies'], str):
             return
         prefix = os.path.relpath(base, directory) + '/'
         owned = [os.path.join(base, config['methodologies'])]
@@ -943,7 +1050,7 @@ class _Plan:
             stale = version is not None and version != _version(auto)
             held = self.source if stale else auto
             at = config['methodologies']
-            owned = [auto] + ([os.path.join(directory, at)] if at is not None else [])
+            owned = [auto] + ([os.path.join(directory, at)] if isinstance(at, str) else [])
             supplied_skills, supplied_commands = self.methodology_links(directory, config)
             skills = [(name, os.path.join(auto, 'skills')) for name in _held(held, 'skills')] + supplied_skills
             commands = [(name, os.path.join(auto, 'bin')) for name in _held(held, 'bin')] + supplied_commands
