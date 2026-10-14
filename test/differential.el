@@ -6,6 +6,7 @@
 ;; emacs -Q --batch -L POSLIB/lisp -l differential.el TASKS OUT
 ;; Each task is (kind path ...); each answer a CID, a refusal or a report.
 
+(require 'pos-checkpoint)
 (require 'pos-cid)
 (require 'pos-ledger)
 (require 'pos-index)
@@ -47,7 +48,7 @@
       ("repair"
        (condition-case err
            (let ((root (file-name-as-directory (file-truename .path))))
-             `((result . ,(pos-seal-repair .path))
+             `((result . ,(pos-checkpoint-repair .path))
                (report . ,(differential-relative root (pos-ledger-check .path)))))
          (pos-ledger-refused (concat "refused:" (symbol-name (cadr err))))))
       ("seal"
