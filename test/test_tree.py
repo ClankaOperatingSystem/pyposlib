@@ -92,16 +92,18 @@ def skill(name):
 
 def source(directory, version, *names):
     """Make at directory a source to install from, of version: each of
-    names that begins clankos- is a skill, and any other a command. What
-    was at directory is replaced."""
+    names that begins clankos-, or is a slot's, is a skill, and any other
+    a command; one that begins bin/ is a command of the rest of the name.
+    What was at directory is replaced."""
     shutil.rmtree(directory, ignore_errors=True)
     write(directory, 'version', version + '\n')
     for name in names:
-        if name.startswith('clankos-'):
+        if not name.startswith('bin/') and (name.startswith('clankos-') or name in tree.SLOTS):
             write(directory, f'skills/{name}/SKILL.md', f'---\nname: {name}\ndescription: A skill.\n---\n')
         else:
-            write(directory, f'bin/{name}', '#!/bin/sh\n')
-            os.chmod(os.path.join(directory, 'bin', name), 0o755)
+            command = name.removeprefix('bin/')
+            write(directory, f'bin/{command}', '#!/bin/sh\n')
+            os.chmod(os.path.join(directory, 'bin', command), 0o755)
     return str(directory)
 
 
@@ -697,6 +699,27 @@ class Trees(unittest.TestCase):
         self.assertTrue(os.path.islink(os.path.join(root, '.agents/skills/clankos-seal')))
         self.assertEqual(Path(root, 'bin/pos-capture').read_text(), '#!/bin/sh\n')
 
+    def test_a_slots_name_the_repository_holds_is_its_filling(self):
+        """A skill or a command of a slot's name that is there is left, and
+        not found. The repository tracks its own capture skill and has an
+        untracked wrap-up command. The source's other skills and commands
+        are linked, the slot names the repository lacks among them."""
+        given = source(self.path('source'), '1', 'capture', 'start-up', 'wrap-up', 'clankos-seal',
+                       'bin/capture', 'bin/start-up', 'bin/wrap-up', 'pos-capture')
+        root = repository(self.path('root'),
+                          {'.clanka/config.yml': text() + 'bin: bin\n', **skill('capture')})
+        write(root, 'bin/wrap-up', '#!/bin/sh\n')
+        self.assertEqual(summary(self.settle(root, given)), [])
+        self.assertFalse(os.path.islink(os.path.join(root, '.agents/skills/capture')))
+        self.assertEqual(Path(root, '.agents/skills/capture/SKILL.md').read_text(),
+                         skill('capture')['.agents/skills/capture/SKILL.md'])
+        for name in ('start-up', 'wrap-up', 'clankos-seal'):
+            self.assertTrue(os.path.islink(os.path.join(root, '.agents/skills', name)))
+        for name in ('capture', 'start-up', 'pos-capture'):
+            self.assertTrue(os.path.islink(os.path.join(root, 'bin', name)))
+        self.assertFalse(os.path.islink(os.path.join(root, 'bin/wrap-up')))
+        self.assertEqual(Path(root, 'bin/wrap-up').read_text(), '#!/bin/sh\n')
+
     def test_a_skills_path_that_is_not_a_directory_is_found(self):
         given = source(self.path('source'), '1', 'clankos-capture')
         root = repository(self.path('root'), {'.clanka/config.yml': text(), '.agents': 'a file\n'})
@@ -809,8 +832,11 @@ class Trees(unittest.TestCase):
         write(self.dir, 'unversioned/skills/clankos-a/SKILL.md', '---\n---\n')
         self.assertEqual(refusal(lambda: tree.plan(root, self.path('unversioned'))), 'bad-source')
         write(self.dir, 'misnamed/version', '1\n')
-        write(self.dir, 'misnamed/skills/capture/SKILL.md', '---\n---\n')
+        write(self.dir, 'misnamed/skills/release/SKILL.md', '---\n---\n')
         self.assertEqual(refusal(lambda: tree.plan(root, self.path('misnamed'))), 'bad-source')
+        write(self.dir, 'slot/version', '1\n')
+        write(self.dir, 'slot/skills/capture/SKILL.md', '---\n---\n')
+        self.assertIsNone(refusal(lambda: tree.plan(root, self.path('slot'))))
 
     def test_the_command_line_installs_from_a_source(self):
         given = source(self.path('source'), '1', 'clankos-capture')
