@@ -77,6 +77,10 @@ _ARCHIVE_END = '# END ClankOS archive excludes\n'
 # convention of keeping skills in .agents/skills/ is described.
 NOTE = 'README.clankos'
 _CONVENTION = 'https://agentskills.io/client-implementation/adding-skills-support'
+# The names of the slots, as doc/pos-slots.txt has them. A skill or a
+# command of one of these names that a repository holds is its own
+# filling of the slot: the tool makes no link there and reports nothing.
+SLOTS = ('capture', 'start-up', 'wrap-up')
 
 
 def _archive_block(text):
@@ -815,8 +819,10 @@ class _Plan:
         directory. links are (name, targets): name is to be a link to the
         entry of that name in targets, a directory in one of owned, the
         directories the tool's links point into. A name held by something
-        else is found and left; a name links gives twice is found for its
-        second; and another of the tool's links there is removed."""
+        else is found and left, unless it is a slot's, one of SLOTS: what
+        holds that is the repository's own filling, left and not found. A
+        name links gives twice is found for its second; and another of the
+        tool's links there is removed."""
         inside = os.path.join(directory, within)
         closed = _closed(directory, within)
         if closed is not None:
@@ -835,6 +841,8 @@ class _Plan:
                 if os.readlink(link) != target:
                     self.act('unlink', path=self.rel(link))
                     self.act('link', path=self.rel(link), target=target)
+            elif name in SLOTS and os.path.lexists(link):
+                names.append(name)
             elif os.path.lexists(link):
                 names.append(name)
                 self.taken(directory, path)
@@ -1023,12 +1031,14 @@ def _held(directory, kind):
 
 def _check_source(source):
     """Refuse source, a directory to install from, unless it is one: it
-    names its version, and each of its skills is named clankos-NAME."""
+    names its version, and each of its skills is named clankos-NAME or
+    is a slot's, one of SLOTS."""
     if _version(source) is None:
         raise Refused('bad-source', f'The source names no version: {source}')
     for name in _held(source, 'skills'):
-        if not name.startswith('clankos-'):
-            raise Refused('bad-source', f"A skill's name does not begin clankos-: {name}")
+        if not name.startswith('clankos-') and name not in SLOTS:
+            raise Refused('bad-source',
+                          f"A skill's name does not begin clankos- and is no slot's: {name}")
 
 
 def _auto(directory):
