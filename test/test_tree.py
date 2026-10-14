@@ -170,6 +170,27 @@ def names(directory, within='.agents/skills'):
     return sorted(os.listdir(inside)) if inside.is_dir() else []
 
 
+def lock(*entries):
+    """A skills-lock.json's text recording entries, each (name, source,
+    ref, url): ref None for none, and url the entry's sourceUrl, as the
+    skills CLI writes it for a git source, or None."""
+    skills = {}
+    for name, source, ref, url in entries:
+        entry = {'source': source}
+        if url:
+            entry['sourceUrl'] = url
+        if ref:
+            entry['ref'] = ref
+        entry.update(sourceType='git' if url else 'github', computedHash='0')
+        skills[name] = entry
+    return json.dumps({'version': 1, 'skills': skills}, indent=2) + '\n'
+
+
+def findings(plan):
+    """The findings of plan as strings: finding, path and detail."""
+    return [f'{f["finding"]} {f["path"]} {f.get("detail")}' for f in plan['findings']]
+
+
 def excludes(directory):
     file = Path(tree._exclude_file(directory))
     return file.read_text(encoding='utf-8').split('\n')[:-1] if file.exists() else []
@@ -1005,6 +1026,66 @@ class Trees(unittest.TestCase):
         self.assertEqual(made['findings'][0]['detail'], 'named by more than one')
         self.assertEqual(os.readlink(os.path.join(root, 'bin/greet')), '../methodologies/alpha/bin/greet')
         self.assertEqual(names(root), ['alpha-greet', 'beta-greet'])
+
+    # Sources and the lock file
+
+    def test_a_lock_file_that_holds_the_sources_is_not_found(self):
+        """Where skills-lock.json holds what the sources declare, nothing is
+        found. A GitHub source written as a URL is the lock file's shorter
+        source."""
+        root = repository(self.path('root'), {
+            '.clanka/config.yml': ('pos: 2\nmethodologies:\n'
+                                   '  - source: https://github.com/team/hello.git\n    ref: v1\n'
+                                   '  - source: git@example.org:someone/shared.git\n    ref: v2\n'
+                                   '    skills: [share-skill]\n    kind: skills-repository\n'),
+            'skills-lock.json': lock(('hello-greet', 'team/hello', 'v1', None),
+                                     ('hello-part', 'team/hello', 'v1', None),
+                                     ('share-skill', 'git@example.org:someone/shared.git', 'v2',
+                                      'git@example.org:someone/shared.git'))})
+        self.assertEqual(findings(self.plan(root)), [])
+
+    def test_how_a_lock_file_differs_from_the_sources_is_found(self):
+        """Each difference is found: entries by name, then sources as
+        declared. An entry of another ref, a skill named and not installed,
+        and a source not installed differ; an entry of a skill its source
+        does not name, and one of no declared source, are undeclared."""
+        root = repository(self.path('root'), {
+            '.clanka/config.yml': ('pos: 2\nmethodologies:\n'
+                                   '  - source: https://example.org/a.git\n    ref: v2\n'
+                                   '  - source: git@example.org:b.git\n    ref: v1\n'
+                                   '    skills: [b-one, b-two]\n'
+                                   '  - source: https://example.org/c.git\n    ref: v1\n'),
+            'skills-lock.json': lock(
+                ('a-x', 'https://example.org/a.git', 'v1', 'https://example.org/a.git'),
+                ('b-one', 'git@example.org:b.git', 'v1', 'git@example.org:b.git'),
+                ('b-three', 'git@example.org:b.git', 'v1', 'git@example.org:b.git'),
+                ('z-other', 'someone/skills', None, None))})
+        self.assertEqual(findings(self.plan(root)), [
+            'lock-differs skills-lock.json a-x: v1 installed, v2 declared',
+            'lock-undeclared skills-lock.json b-three: not among the skills of git@example.org:b.git',
+            'lock-undeclared skills-lock.json z-other: from someone/skills, which is not declared',
+            'lock-differs skills-lock.json b-two: not installed from git@example.org:b.git',
+            'lock-differs skills-lock.json https://example.org/c.git at v1: not installed'])
+
+    def test_a_lock_file_that_is_not_one_is_found(self):
+        """A skills-lock.json that is not the skills CLI's object differs."""
+        root = repository(self.path('root'), {
+            '.clanka/config.yml': 'pos: 2\nmethodologies:\n  - source: https://example.org/a.git\n    ref: v1\n',
+            'skills-lock.json': '{"version": 1, "skills": []}\n'})
+        self.assertEqual(findings(self.plan(root)), ['lock-differs skills-lock.json not a lock file'])
+
+    def test_each_node_compares_its_own_lock_file(self):
+        """A node with no sources has each entry of its lock file
+        undeclared. A project that is a directory of the repository
+        compares its own."""
+        root = repository(self.path('root'), {
+            **config('  - path: projects/p\n'),
+            'skills-lock.json': lock(('grill-me', 'someone/skills', None, None)),
+            'projects/p/.clanka/config.yml':
+                'pos: 2\nmethodologies:\n  - source: https://example.org/a.git\n    ref: v1\n'})
+        self.assertEqual(findings(self.plan(root)), [
+            'lock-undeclared skills-lock.json grill-me: from someone/skills, which is not declared',
+            'lock-differs projects/p/skills-lock.json https://example.org/a.git at v1: not installed'])
 
 
 if __name__ == '__main__':
