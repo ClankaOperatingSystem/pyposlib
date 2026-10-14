@@ -223,6 +223,7 @@ def methodologies(config):
 SKILL_NAME = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*')
 _GIT_URL = re.compile(r'(?:[A-Za-z][A-Za-z0-9+.-]*://[^/ ]+/|[^@/: ]+@[^@/: ]+:)[^ ]+')
 _HARNESS = re.compile(r'[a-z0-9][a-z0-9-]*')
+LOCK_FILE = 'skills-lock.json'
 
 
 def source_name(source):
@@ -310,6 +311,73 @@ def _harnesses(value):
             raise Refused('bad-value', f'Not a harness\'s name: {name}')
     _once(value, 'A harness')
     return value
+
+
+def _lock_entries(file):
+    """The skills file records, each (name, entry), by name; or None for
+    a file that is not a JSON object whose skills maps each name to an
+    object with a string source."""
+    try:
+        parsed = json.loads(Path(file).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    skills = parsed.get('skills') if isinstance(parsed, dict) else None
+    if not isinstance(skills, dict) or not all(
+            isinstance(entry, dict) and entry and isinstance(entry.get('source'), str)
+            for entry in skills.values()):
+        return None
+    return sorted(skills.items())
+
+
+def _lock_key(entry):
+    url = entry.get('sourceUrl')
+    return source_key(url if isinstance(url, str) else entry['source'])
+
+
+def lock_differences(directory, config):
+    """How the skills-lock.json at directory, a node's, differs from
+    config's sources, as doc/pos-directory.txt section 6 has it: a list of
+    dicts of finding, lock-differs or lock-undeclared; skill, the skill's
+    name or None; and detail. The entries come by name, then the sources
+    in the order declared. None where config declares no sources and
+    there is no skills-lock.json."""
+    file = os.path.join(directory, LOCK_FILE)
+    declared = config['methodologies']
+    sources = declared if isinstance(declared, list) else []
+    exists = os.path.exists(file)
+    found = []
+
+    def find(finding, skill, detail):
+        found.append({'finding': finding, 'skill': skill, 'detail': detail})
+
+    if not sources and not exists:
+        return found
+    entries = _lock_entries(file) if exists else []
+    if entries is None:
+        find('lock-differs', None, 'not a lock file')
+        return found
+    by_key = {source_key(source['source']): source for source in reversed(sources)}
+    for name, entry in entries:
+        source = by_key.get(_lock_key(entry))
+        locked = entry.get('ref')
+        if source is None:
+            find('lock-undeclared', name, f'{name}: from {entry["source"]}, which is not declared')
+        elif source['skills'] is not None and name not in source['skills']:
+            find('lock-undeclared', name, f'{name}: not among the skills of {source["source"]}')
+        elif locked != source['ref']:
+            find('lock-differs', name,
+                 f'{name}: {locked if isinstance(locked, str) else "no ref"} installed, '
+                 f'{source["ref"]} declared')
+    for source in sources:
+        key = source_key(source['source'])
+        names = [name for name, entry in entries if _lock_key(entry) == key]
+        if not names:
+            find('lock-differs', None, f'{source["source"]} at {source["ref"]}: not installed')
+        elif source['skills'] is not None:
+            for skill in source['skills']:
+                if skill not in names:
+                    find('lock-differs', skill, f'{skill}: not installed from {source["source"]}')
+    return found
 
 
 def _own_scope(path, children, what):
@@ -1018,9 +1086,18 @@ class _Plan:
             commands.extend((command, os.path.join(directory, 'bin')) for command in _held(directory, 'bin'))
         return skills, commands
 
+    def lock(self, base, config):
+        """Find how the skills-lock.json at base, a node's directory,
+        differs from config, its configuration."""
+        file = self.rel(os.path.join(base, LOCK_FILE))
+        for difference in lock_differences(base, config):
+            self.find(difference['finding'], file, difference['detail'])
+
     def in_directory(self, directory, base, config):
         """Plan the links to the methodologies of the node at base, a
-        directory of the repository at directory, with config its own."""
+        directory of the repository at directory, with config its own.
+        Find how its skills-lock.json differs from its sources too."""
+        self.lock(base, config)
         if not isinstance(config['methodologies'], str):
             return
         prefix = os.path.relpath(base, directory) + '/'
@@ -1062,6 +1139,7 @@ class _Plan:
             if config['bin'] is not None:
                 self.link_in(directory, config['bin'], commands, owned)
             self.claude(directory, '', skills, owned)
+            self.lock(directory, config)
         for base, own in node.locals:
             self.in_directory(directory, base, own)
         for _, child in node.children:
