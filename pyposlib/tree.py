@@ -1156,11 +1156,8 @@ class _Plan:
         supply, and its skills-lock.json compared with the source's skills.
         A node that is a directory of it has links to its own
         methodologies. One with no configuration, a product, has nothing
-        planned in it but the removal of links an earlier tool made."""
+        planned in it."""
         directory = node.directory
-        for name in _agents_entries(directory):
-            if self.earlier_link(directory, name):
-                self.act('unlink', path=self.rel(os.path.join(directory, '.agents/skills', name)))
         auto = _auto(directory) if node.config else None
         if auto is not None:
             config = node.config
@@ -1185,21 +1182,6 @@ class _Plan:
             self.in_directory(directory, base, own)
         for _, child in node.children:
             self.installs(child)
-
-    def earlier_link(self, directory, name):
-        """Whether name, in the skills at directory, is a link an earlier
-        tool made: an untracked symbolic link whose target is a skill's
-        directory in another repository of the tree."""
-        skills = os.path.join(directory, '.agents', 'skills')
-        link = os.path.join(skills, name)
-        if not os.path.islink(link):
-            return False
-        target = os.path.normpath(os.path.join(skills, os.readlink(link)))
-        parent = os.path.dirname(target)
-        return (target.startswith(self.root + '/')
-                and parent.endswith('/.agents/skills')
-                and parent != skills
-                and not _tracked(directory, '.agents/skills/' + name))
 
 
 def _through_link(directory, path):
@@ -1285,15 +1267,6 @@ def _closed(directory, path):
         if os.path.islink(at) or (os.path.lexists(at) and not os.path.isdir(at)):
             return '/'.join(within)
     return None
-
-
-def _agents_entries(directory, path='.agents/skills'):
-    """The names in path, .agents/skills by default, of the repository at
-    directory, sorted: none where a part of that path is not an ordinary
-    directory."""
-    skills = os.path.join(directory, path)
-    return (sorted(os.listdir(skills))
-            if _closed(directory, path) is None and os.path.isdir(skills) else [])
 
 
 def plan(root, source=None):

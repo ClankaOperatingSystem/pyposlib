@@ -820,20 +820,6 @@ class Trees(unittest.TestCase):
         self.assertEqual(summary(self.settle(root, given)), ['name-taken bin'])
         self.assertEqual(Path(root, 'bin').read_text(), 'a file\n')
 
-    def test_a_link_an_earlier_tool_made_is_removed(self):
-        """A link from one repository's skills to another's is removed: from
-        a product too, since the tool made it."""
-        product = repository(self.path('origins/product'), {'README': 'product\n'})
-        root = repository(self.path('root'),
-                          {'.clanka/config.yml': text(child('products/product', product)), **skill('r')})
-        self.settle(root)
-        link = self.path('root/products/product/.agents/skills/r')
-        os.makedirs(os.path.dirname(link))
-        os.symlink('../../../../.agents/skills/r', link)
-        self.assertEqual(summary(self.plan(root)), ['unlink products/product/.agents/skills/r'])
-        self.settle(root)
-        self.assertFalse(os.path.islink(link))
-
     def test_a_link_to_a_skill_in_auto_is_removed(self):
         """A link an earlier tool made from .agents/skills/ into auto/ is
         removed. The skill is then the image's to install."""
