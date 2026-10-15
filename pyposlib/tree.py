@@ -24,11 +24,13 @@ a tree to what its files declare.
 
 What is installed comes from a source the tool is given, a directory of
 skills and commands. It is copied into auto/ in the configuration
-directory of each repository that has a configuration, and links to it
-are made where a coding agent and a person look. A node's
+directory of each repository that has a configuration, and links to its
+commands are made where a person looks. Its skills are installed by the
+image's install command, as a source of the repository's
+skills-lock.json, which the tool compares with them. A node's
 methodologies, the children directly beneath its methodologies path,
-supply skills and commands the same way, by links to them where they
-lie, with nothing copied. Nothing is written in a repository with no
+supply skills and commands by links to them where they lie, with
+nothing copied. Nothing is written in a repository with no
 configuration, a product.
 
 - read_config: a config.yaml's text, checked, with defaults filled in.
@@ -77,9 +79,9 @@ _ARCHIVE_END = '# END ClankOS archive excludes\n'
 # convention of keeping skills in .agents/skills/ is described.
 NOTE = 'README.clankos'
 _CONVENTION = 'https://agentskills.io/client-implementation/adding-skills-support'
-# The names of the slots, as doc/pos-slots.txt has them. A skill or a
-# command of one of these names that a repository holds is its own
-# filling of the slot: the tool makes no link there and reports nothing.
+# The names of the slots, as doc/pos-slots.txt has them. A command of
+# one of these names that a repository holds is its own filling of the
+# slot: the tool makes no link there and reports nothing.
 SLOTS = ('capture', 'start-up', 'wrap-up')
 
 
@@ -334,16 +336,58 @@ def _lock_key(entry):
     return source_key(url if isinstance(url, str) else entry['source'])
 
 
-def lock_differences(directory, config):
+def _line(directory, name):
+    """The first line of the file name in directory, stripped, or None."""
+    file = os.path.join(directory, name)
+    if not os.path.isfile(file):
+        return None
+    return Path(file).read_text(encoding='utf-8').split('\n')[0].strip() or None
+
+
+def lock_image(source, directory):
+    """The image's skills at directory, a repository's root, as a source:
+    a dict of source, ref and skills, as a declared source is. source is
+    the directory the image installs from, which holds repository, the
+    git URL of the repository the image was made from; commit, the full
+    id of the commit; and skills/NAME/. A slot's skill is left out where
+    directory fills the slot itself: something is at .agents/skills/NAME
+    that is not a symbolic link into directory's auto/ and has no entry in
+    its skills-lock.json of the image's repository. None where source
+    names no repository or commit, or holds no skill."""
+    repository, commit = _line(source, 'repository'), _line(source, 'commit')
+    if repository is None or commit is None or not os.path.isdir(os.path.join(source, 'skills')):
+        return None
+    file = os.path.join(directory, LOCK_FILE)
+    entries = dict(_lock_entries(file) or []) if os.path.exists(file) else {}
+    key = source_key(repository)
+    auto = _auto(directory)
+
+    def filled(name):
+        path = os.path.join(directory, '.agents', 'skills', name)
+        if name not in SLOTS or not os.path.lexists(path):
+            return False
+        if os.path.islink(path) and auto is not None:
+            target = os.path.normpath(os.path.join(os.path.dirname(path), os.readlink(path)))
+            if target.startswith(auto + '/'):
+                return False
+        entry = entries.get(name)
+        return not (entry is not None and _lock_key(entry) == key)
+
+    names = [name for name in _held(source, 'skills') if not filled(name)]
+    return {'source': repository, 'ref': commit, 'skills': names} if names else None
+
+
+def lock_differences(directory, config, image=None):
     """How the skills-lock.json at directory, a node's, differs from
-    config's sources, as doc/pos-directory.txt section 6 has it: a list of
-    dicts of finding, lock-differs or lock-undeclared; skill, the skill's
-    name or None; and detail. The entries come by name, then the sources
-    in the order declared. None where config declares no sources and
-    there is no skills-lock.json."""
+    config's sources, as doc/pos-directory.txt section 6 has it. image, if
+    given, is one source more, as lock_image gives it. A list of dicts of
+    finding, lock-differs or lock-undeclared; skill, the skill's name or
+    None; and detail. The entries come by name, then the sources in the
+    order declared. None where config declares no sources and there is
+    no skills-lock.json."""
     file = os.path.join(directory, LOCK_FILE)
     declared = config['methodologies']
-    sources = declared if isinstance(declared, list) else []
+    sources = (declared if isinstance(declared, list) else []) + ([image] if image else [])
     exists = os.path.exists(file)
     found = []
 
@@ -1086,11 +1130,12 @@ class _Plan:
             commands.extend((command, os.path.join(directory, 'bin')) for command in _held(directory, 'bin'))
         return skills, commands
 
-    def lock(self, base, config):
+    def lock(self, base, config, image=None):
         """Find how the skills-lock.json at base, a node's directory,
-        differs from config, its configuration."""
+        differs from config, its configuration. image, if given, is the
+        image's skills as a source, as lock_image gives it."""
         file = self.rel(os.path.join(base, LOCK_FILE))
-        for difference in lock_differences(base, config):
+        for difference in lock_differences(base, config, image):
             self.find(difference['finding'], file, difference['detail'])
 
     def in_directory(self, directory, base, config):
@@ -1111,9 +1156,10 @@ class _Plan:
     def installs(self, node):
         """Plan what is installed in node and in the repositories beneath
         it. A repository with a configuration has auto/ in its configuration
-        directory, replaced from the source when its version is another, and
-        links to what auto/ holds and to what its methodologies supply. A
-        node that is a directory of it has links to its own
+        directory, replaced from the source when its version is another,
+        links to the commands auto/ holds and to what its methodologies
+        supply, and its skills-lock.json compared with the source's skills.
+        A node that is a directory of it has links to its own
         methodologies. One with no configuration, a product, has nothing
         planned in it but the removal of links an earlier tool made."""
         directory = node.directory
@@ -1129,7 +1175,7 @@ class _Plan:
             at = config['methodologies']
             owned = [auto] + ([os.path.join(directory, at)] if isinstance(at, str) else [])
             supplied_skills, supplied_commands = self.methodology_links(directory, config)
-            skills = [(name, os.path.join(auto, 'skills')) for name in _held(held, 'skills')] + supplied_skills
+            skills = supplied_skills
             commands = [(name, os.path.join(auto, 'bin')) for name in _held(held, 'bin')] + supplied_commands
             if stale or os.path.lexists(auto):
                 self.exclude(directory, os.path.relpath(auto, directory))
@@ -1139,7 +1185,8 @@ class _Plan:
             if config['bin'] is not None:
                 self.link_in(directory, config['bin'], commands, owned)
             self.claude(directory, '', skills, owned)
-            self.lock(directory, config)
+            self.lock(directory, config,
+                      lock_image(held, directory) if os.path.isdir(held) else None)
         for base, own in node.locals:
             self.in_directory(directory, base, own)
         for _, child in node.children:
@@ -1216,10 +1263,14 @@ def _held(directory, kind):
 
 def _check_source(source):
     """Refuse source, a directory to install from, unless it is one: it
-    names its version, and each of its skills is named clankos-NAME or
-    is a slot's, one of SLOTS."""
+    names its version, its repository and its commit, a full id, and each
+    of its skills is named clankos-NAME or is a slot's, one of SLOTS."""
     if _version(source) is None:
         raise Refused('bad-source', f'The source names no version: {source}')
+    if _line(source, 'repository') is None:
+        raise Refused('bad-source', f'The source names no repository: {source}')
+    if not re.fullmatch(r'[0-9a-f]{40}', _line(source, 'commit') or ''):
+        raise Refused('bad-source', f'The source names no commit by its full id: {source}')
     for name in _held(source, 'skills'):
         if not name.startswith('clankos-') and name not in SLOTS:
             raise Refused('bad-source',
