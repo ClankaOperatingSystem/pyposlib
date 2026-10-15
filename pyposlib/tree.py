@@ -76,10 +76,6 @@ _UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 DEFAULT_EXCLUDE = ('archives', 'attic', 'node_modules', '_*', '.*')
 _ARCHIVE_BEGIN = '# BEGIN ClankOS archive excludes\n'
 _ARCHIVE_END = '# END ClankOS archive excludes\n'
-# The note the tool writes in an ordinary .claude/skills, and where the
-# convention of keeping skills in .agents/skills/ is described.
-NOTE = 'README.clankos'
-_CONVENTION = 'https://agentskills.io/client-implementation/adding-skills-support'
 # The names of the slots, as doc/pos-slots.txt has them. A command of
 # one of these names that a repository holds is its own filling of the
 # slot: the tool makes no link there and reports nothing.
@@ -935,17 +931,7 @@ class _Plan:
         if not _excluded(directory, path):
             self.act('exclude', repository=self.rel(directory), path=path)
 
-    def repeated(self, here, above):
-        """Find each skill of here with the name of another in above, each
-        a dict as _skills_in gives it. Two with one name and one text are
-        the same skill, and are not found."""
-        for name, file in here.items():
-            other = above.get(name)
-            if other is not None and _read(file) != _read(other):
-                self.find('name-repeated', self.rel(os.path.dirname(file)),
-                          self.rel(os.path.dirname(other)))
-
-    def undeclared(self, repo, mounted, local, excluded, prefix='', node='', above=None, skills=False):
+    def undeclared(self, repo, mounted, local, excluded, prefix='', node=''):
         """Find what is beneath the repository at repo that no entry
         declares: a repository, and a directory holding a configuration.
         mounted are the declared paths of repositories, which are not
@@ -954,17 +940,7 @@ class _Plan:
         excluded are the exclusions in force, declared by the node at
         node, a prefix with its final slash or '' for repo; a local node
         that declares its own replaces them beneath it. prefix is the
-        directory being looked in, with its final slash.
-
-        With skills, for a repository that has a configuration, find as
-        well each skill of a directory that has the name of another skill
-        in a directory above it (name-repeated). above are the skills of
-        the directories above prefix in the repository."""
-        above = above or {}
-        if skills:
-            here = _skills_in(os.path.join(repo, prefix))
-            self.repeated(here, above)
-            above = {**above, **here}
+        directory being looked in, with its final slash."""
         for name in sorted(os.listdir(os.path.join(repo, prefix))):
             path = prefix + name
             full = os.path.join(repo, path)
@@ -975,7 +951,7 @@ class _Plan:
             if path in local:
                 own = local[path]
                 self.undeclared(repo, mounted, local, excluded if own is None else own,
-                                path + '/', node if own is None else path + '/', above, skills)
+                                path + '/', node if own is None else path + '/')
             # A submodule is the repository's own, tracked and declared by git.
             elif _is_repository(full):
                 if not _tracked(repo, path):
@@ -983,7 +959,7 @@ class _Plan:
             elif config_files(full):
                 self.find('undeclared', self.rel(full), 'a configuration')
             else:
-                self.undeclared(repo, mounted, local, excluded, path + '/', node, above, skills)
+                self.undeclared(repo, mounted, local, excluded, path + '/', node)
 
     def declared(self, repo, base, config, mounted, local, locals):
         """Plan what config declares, the configuration of the node at
@@ -1071,7 +1047,7 @@ class _Plan:
         mounted, local, locals = [], {}, []
         nodes, held = (self.declared(directory, directory, config, mounted, local, locals)
                        if config else ([], []))
-        self.undeclared(directory, mounted, local, exclusions(config), skills=bool(config))
+        self.undeclared(directory, mounted, local, exclusions(config))
         if config:
             self.archive_excludes(directory)
         return _Node(directory, config, nodes, held, locals)
@@ -1130,41 +1106,6 @@ class _Plan:
                 if name not in names and _own_link(link, owned):
                     self.act('unlink', path=self.rel(link))
 
-    def claude(self, directory, prefix, links, owned):
-        """Plan .claude/skills beneath prefix in the repository at directory
-        for links. prefix is a directory of the repository, relative and
-        ending in a slash, or empty for the repository itself; links and
-        owned are as link_in takes them. Absent, .claude/skills is to be a
-        link to ../.agents/skills when there are skills there. An ordinary
-        directory has the tool's links made in it too, and its note. A file
-        or a symbolic link, there or at .claude, is left."""
-        skills_path, agents_path = prefix + '.claude/skills', prefix + '.agents/skills'
-        inside = os.path.join(directory, skills_path)
-        closed = _closed(directory, skills_path)
-        ordinary = closed is None and os.path.isdir(inside)
-        if closed is not None:
-            pass
-        elif ordinary:
-            self.link_in(directory, skills_path, links, owned)
-            path, note = f'{skills_path}/{NOTE}', os.path.join(inside, NOTE)
-            if not links:
-                pass
-            elif _tracked(directory, path):
-                self.taken(directory, path)
-            else:
-                self.exclude(directory, path)
-                if not (os.path.isfile(note)
-                        and Path(note).read_text(encoding='utf-8') == _note_text(inside)):
-                    self.act('note', path=self.rel(note))
-        elif links or _agents_entries(directory, agents_path):
-            self.exclude(directory, skills_path)
-            self.act('link', path=self.rel(inside), target='../.agents/skills')
-        # The note went with the directory's entries when they were moved.
-        stray = os.path.join(directory, agents_path, NOTE)
-        if (not ordinary and os.path.isfile(stray)
-                and not _tracked(directory, f'{agents_path}/{NOTE}')):
-            self.act('unlink', path=self.rel(stray))
-
     def methodology_links(self, base, config):
         """What the methodologies config declares at base supply: (skills,
         commands), each a list of (name, directory) as link_in takes, by
@@ -1206,7 +1147,6 @@ class _Plan:
         self.link_in(directory, prefix + '.agents/skills', skills, owned)
         if config['bin'] is not None:
             self.link_in(directory, prefix + config['bin'], commands, owned)
-        self.claude(directory, prefix, skills, owned)
 
     def installs(self, node):
         """Plan what is installed in node and in the repositories beneath
@@ -1239,7 +1179,6 @@ class _Plan:
             self.link_in(directory, '.agents/skills', skills, owned)
             if config['bin'] is not None:
                 self.link_in(directory, config['bin'], commands, owned)
-            self.claude(directory, '', skills, owned)
             self.lock(directory, config,
                       lock_image(held, directory) if os.path.isdir(held) else None)
         for base, own in node.locals:
@@ -1261,22 +1200,6 @@ class _Plan:
                 and parent.endswith('/.agents/skills')
                 and parent != skills
                 and not _tracked(directory, '.agents/skills/' + name))
-
-
-def _skills_in(directory):
-    """The skills of directory, a dict of name and file: each entry of its
-    .agents/skills that holds a SKILL.md, a link to one among them, with
-    that SKILL.md."""
-    inside = os.path.join(directory, '.agents', 'skills')
-    if not os.path.isdir(inside):
-        return {}
-    return {name: os.path.join(inside, name, 'SKILL.md') for name in sorted(os.listdir(inside))
-            if os.path.isfile(os.path.join(inside, name, 'SKILL.md'))}
-
-
-def _read(file):
-    with open(file, 'rb') as handle:
-        return handle.read()
 
 
 def _through_link(directory, path):
@@ -1373,23 +1296,6 @@ def _agents_entries(directory, path='.agents/skills'):
             if _closed(directory, path) is None and os.path.isdir(skills) else [])
 
 
-def _note_text(inside):
-    """The text of the note for inside, an ordinary .claude/skills. It
-    names what there is no skill: not a directory holding a SKILL.md."""
-    others = [name for name in sorted(os.listdir(inside))
-              if name != NOTE and not os.path.exists(os.path.join(inside, name, 'SKILL.md'))]
-    listed = ('\nA skill is a directory holding a SKILL.md. These entries are not,\n'
-              'and no agent reads them as skills:\n\n'
-              + ''.join(f'  {name}\n' for name in others)) if others else ''
-    return ('ClankOS made the symbolic links in this directory, and this note.\n\n'
-            "Coding agents share skills from .agents/skills/. This directory's\n"
-            'skills can be moved there, and .claude/skills replaced by a symbolic\n'
-            'link to ../.agents/skills. ClankOS then makes its links in the one\n'
-            'place and removes this note.\n'
-            + listed
-            + f'\nThe convention is described at\n{_CONVENTION}\n')
-
-
 def plan(root, source=None):
     """The plan for the tree at root, a repository. source, if given, is
     the directory to install from. A dict of pos, the
@@ -1435,9 +1341,6 @@ def _do(root, action, source=None):
             os.remove(auto)
         os.makedirs(os.path.dirname(auto), exist_ok=True)
         shutil.copytree(source, auto)
-    elif do == 'note':
-        note = Path(root, action['path'])
-        note.write_text(_note_text(str(note.parent)), encoding='utf-8')
     elif do == 'archive-excludes':
         directory = os.path.join(root, action['repository'])
         file = Path(_exclude_file(directory))
@@ -1477,8 +1380,8 @@ def _do(root, action, source=None):
                                     f'{error.strerror}') from None
     elif do == 'unlink':
         link = os.path.join(root, action['path'])
-        if not (os.path.islink(link) or os.path.basename(link) == NOTE):
-            raise Refused('failed', f'Not a link or a note: {action["path"]}')
+        if not os.path.islink(link):
+            raise Refused('failed', f'Not a link: {action["path"]}')
         os.remove(link)
     else:
         raise Refused('failed', f'Not an action this tool does: {do}')
@@ -1511,12 +1414,12 @@ def ignore_archives(root):
 
 def install(root, source):
     """Apply only what is installed at root from source, and return the
-    remaining plan: the exclude, install, link, unlink and note actions of
-    a fresh plan made with source. Clone no repository and change no
+    remaining plan: the exclude, install, link and unlink actions of a
+    fresh plan made with source. Clone no repository and change no
     archive rule."""
     directory, held = os.path.abspath(root), os.path.abspath(source)
     for action in plan(root, source)['actions']:
-        if action['do'] in ('exclude', 'install', 'link', 'unlink', 'note'):
+        if action['do'] in ('exclude', 'install', 'link', 'unlink'):
             _do(directory, action, held)
     return plan(root, source)
 
