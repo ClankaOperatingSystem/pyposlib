@@ -49,6 +49,7 @@ configuration, a product.
 The agent files of the document's section 5 are not planned: a server is
 read and checked, and nothing is done with it.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -331,6 +332,51 @@ def _lock_entries(file):
     return sorted(skills.items())
 
 
+# The ASCII characters in the order the Unicode collation gives them.
+# Each upper-case letter sorts with its lower-case one.
+_ORDER = " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _collation_key(string):
+    """The key string sorts by in the Unicode collation: its letters,
+    then their case, so that a lower-case letter sorts before its
+    upper-case one only where the strings are otherwise equal. A
+    character outside ASCII sorts after them all, by its code."""
+    letters = tuple(_ORDER.index(char.lower()) if ord(char) < 128 and char.lower() in _ORDER
+                    else 128 + ord(char) for char in string)
+    return letters, tuple(1 if 'A' <= char <= 'Z' else 0 for char in string)
+
+
+def _files(directory, prefix=''):
+    """The files beneath directory, as paths relative to it. A symbolic
+    link is no file, and a directory named .git or node_modules is not
+    looked in."""
+    found = []
+    for name in os.listdir(os.path.join(directory, prefix)):
+        path = prefix + name
+        full = os.path.join(directory, path)
+        if os.path.islink(full):
+            continue
+        if os.path.isdir(full):
+            if name not in ('.git', 'node_modules'):
+                found += _files(directory, path + '/')
+        elif os.path.isfile(full):
+            found.append(path)
+    return found
+
+
+def lock_hash(directory):
+    """The hash of the skill directory, as the skills CLI computes it:
+    computedHash of a lock entry. The lower-case hex SHA-256 of each
+    file's path relative to directory, in UTF-8, followed by its bytes,
+    the files in the order of their paths in the Unicode collation."""
+    digest = hashlib.sha256()
+    for path in sorted(_files(directory), key=_collation_key):
+        digest.update(path.encode('utf-8'))
+        digest.update(Path(directory, path).read_bytes())
+    return digest.hexdigest()
+
+
 def _lock_key(entry):
     url = entry.get('sourceUrl')
     return source_key(url if isinstance(url, str) else entry['source'])
@@ -382,8 +428,10 @@ def lock_differences(directory, config, image=None):
     config's sources, as doc/pos-directory.txt section 6 has it. image, if
     given, is one source more, as lock_image gives it. A list of dicts of
     finding, lock-differs or lock-undeclared; skill, the skill's name or
-    None; and detail. The entries come by name, then the sources in the
-    order declared. None where config declares no sources and there is
+    None; and detail. An entry of a declared source at its ref differs
+    where its skill's directory in .agents/skills/ is not there, or has
+    another hash than computedHash. The entries come by name, then the
+    sources in the order declared. None where config declares no sources and there is
     no skills-lock.json."""
     file = os.path.join(directory, LOCK_FILE)
     declared = config['methodologies']
@@ -412,6 +460,13 @@ def lock_differences(directory, config, image=None):
             find('lock-differs', name,
                  f'{name}: {locked if isinstance(locked, str) else "no ref"} installed, '
                  f'{source["ref"]} declared')
+        else:
+            installed = os.path.join(directory, '.agents', 'skills', name)
+            computed = entry.get('computedHash')
+            if not os.path.isdir(installed):
+                find('lock-differs', name, f'{name}: not in .agents/skills/')
+            elif isinstance(computed, str) and computed != lock_hash(installed):
+                find('lock-differs', name, f'{name}: changed since it was installed')
     for source in sources:
         key = source_key(source['source'])
         names = [name for name, entry in entries if _lock_key(entry) == key]
