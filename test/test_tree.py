@@ -23,6 +23,7 @@ test looks at a plan it also asks poslib for the plan of the same tree,
 which must be the same bytes; that part needs Emacs and a poslib
 checkout (POSLIB), and is left out without Emacs.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -88,6 +89,12 @@ def repository(directory, files=None):
 def skill(name):
     """The files of a repository's own skill name."""
     return {f'.agents/skills/{name}/SKILL.md': f'---\nname: {name}\ndescription: A skill.\n---\n'}
+
+
+def skill_hash(name):
+    """The hash of the directory of the skill name, as skill makes it."""
+    text = skill(name)[f'.agents/skills/{name}/SKILL.md']
+    return hashlib.sha256(('SKILL.md' + text).encode('utf-8')).hexdigest()
 
 
 # The repository a test's source says it was made from.
@@ -185,16 +192,17 @@ def names(directory, within='.agents/skills'):
 
 def lock(*entries):
     """A skills-lock.json's text recording entries, each (name, source,
-    ref, url): ref None for none, and url the entry's sourceUrl, as the
-    skills CLI writes it for a git source, or None."""
+    ref, url) or (name, source, ref, url, hash): ref None for none, url
+    the entry's sourceUrl, as the skills CLI writes it for a git source,
+    or None, and hash its computedHash, 0 if absent."""
     skills = {}
-    for name, source, ref, url in entries:
+    for name, source, ref, url, *hash in entries:
         entry = {'source': source}
         if url:
             entry['sourceUrl'] = url
         if ref:
             entry['ref'] = ref
-        entry.update(sourceType='git' if url else 'github', computedHash='0')
+        entry.update(sourceType='git' if url else 'github', computedHash=hash[0] if hash else '0')
         skills[name] = entry
     return json.dumps({'version': 1, 'skills': skills}, indent=2) + '\n'
 
@@ -209,8 +217,8 @@ def install(repository, source):
     does: each skill lock_image gives is copied into .agents/skills/, in
     place of the tool's link or an earlier copy; a skill installed from
     the image before that is no longer among them is removed;
-    skills-lock.json records them, at the source's commit; and the
-    repository commits it."""
+    skills-lock.json records them, at the source's commit, with each one's
+    hash; and the repository commits it."""
     image = tree.lock_image(source, repository)
     skills = os.path.join(repository, '.agents', 'skills')
     file = os.path.join(repository, 'skills-lock.json')
@@ -229,7 +237,8 @@ def install(repository, source):
         shutil.rmtree(path, ignore_errors=True)
         shutil.copytree(os.path.join(source, 'skills', name), path)
     write(repository, 'skills-lock.json',
-          lock(*[(name, IMAGE, image['ref'], IMAGE) for name in image['skills']]))
+          lock(*[(name, IMAGE, image['ref'], IMAGE, tree.lock_hash(os.path.join(skills, name)))
+                 for name in image['skills']]))
     commit(repository)
 
 
@@ -1142,10 +1151,14 @@ class Trees(unittest.TestCase):
                                    '  - source: https://github.com/team/hello.git\n    ref: v1\n'
                                    '  - source: git@example.org:someone/shared.git\n    ref: v2\n'
                                    '    skills: [share-skill]\n    kind: skills-repository\n'),
-            'skills-lock.json': lock(('hello-greet', 'team/hello', 'v1', None),
-                                     ('hello-part', 'team/hello', 'v1', None),
+            'skills-lock.json': lock(('hello-greet', 'team/hello', 'v1', None,
+                                      skill_hash('hello-greet')),
+                                     ('hello-part', 'team/hello', 'v1', None,
+                                      skill_hash('hello-part')),
                                      ('share-skill', 'git@example.org:someone/shared.git', 'v2',
-                                      'git@example.org:someone/shared.git'))})
+                                      'git@example.org:someone/shared.git',
+                                      skill_hash('share-skill'))),
+            **skill('hello-greet'), **skill('hello-part'), **skill('share-skill')})
         self.assertEqual(findings(self.plan(root)), [])
 
     def test_how_a_lock_file_differs_from_the_sources_is_found(self):
@@ -1161,15 +1174,51 @@ class Trees(unittest.TestCase):
                                    '  - source: https://example.org/c.git\n    ref: v1\n'),
             'skills-lock.json': lock(
                 ('a-x', 'https://example.org/a.git', 'v1', 'https://example.org/a.git'),
-                ('b-one', 'git@example.org:b.git', 'v1', 'git@example.org:b.git'),
+                ('b-one', 'git@example.org:b.git', 'v1', 'git@example.org:b.git',
+                 skill_hash('b-one')),
                 ('b-three', 'git@example.org:b.git', 'v1', 'git@example.org:b.git'),
-                ('z-other', 'someone/skills', None, None))})
+                ('z-other', 'someone/skills', None, None)),
+            **skill('b-one')})
         self.assertEqual(findings(self.plan(root)), [
             'lock-differs skills-lock.json a-x: v1 installed, v2 declared',
             'lock-undeclared skills-lock.json b-three: not among the skills of git@example.org:b.git',
             'lock-undeclared skills-lock.json z-other: from someone/skills, which is not declared',
             'lock-differs skills-lock.json b-two: not installed from git@example.org:b.git',
             'lock-differs skills-lock.json https://example.org/c.git at v1: not installed'])
+
+    def test_a_skill_directory_hashes_as_the_skills_cli_does(self):
+        """A skill directory's hash is the skills CLI's computedHash for it.
+        Its files are taken in the Unicode collation's order of their
+        paths: case second, and punctuation before letters. A symbolic
+        link, .git and node_modules are left out. The expected hash is the
+        skills CLI's for the same directory."""
+        directory = self.path('skill')
+        for path, text in (('SKILL.md', 'skill\n'), ('references/b-two.md', 'b\n'),
+                           ('references/b_one.md', 'a\n'), ('agents/openai.yaml', 'agents\n'),
+                           ('agent-brief.md', 'brief\n'), ('.git/HEAD', 'x\n'),
+                           ('node_modules/z.js', 'y\n'), ('README.md', 'R\n'),
+                           ('readme.txt', 'r\n')):
+            write(directory, path, text)
+        os.symlink('SKILL.md', os.path.join(directory, 'link.md'))
+        self.assertEqual(tree.lock_hash(directory),
+                         'fac7b24bfc13ab26d209d5b5d59470eba12d110c0c187d51a7ee9f8d323733e6')
+
+    def test_an_installed_skill_that_is_changed_or_gone_is_found(self):
+        """A skill whose directory has another hash than its entry's
+        differs. So does one whose entry is there and whose directory is
+        not."""
+        url = 'https://example.org/a.git'
+        root = repository(self.path('root'), {
+            '.clanka/config.yml': f'pos: 2\nmethodologies:\n  - source: {url}\n    ref: v1\n',
+            'skills-lock.json': lock(*[(name, url, 'v1', url, skill_hash(name))
+                                       for name in ('a-edited', 'a-gone', 'a-kept')]),
+            **skill('a-edited'), **skill('a-gone'), **skill('a-kept')})
+        self.assertEqual(findings(self.plan(root)), [])
+        write(root, '.agents/skills/a-edited/SKILL.md', 'edited\n')
+        shutil.rmtree(os.path.join(root, '.agents/skills/a-gone'))
+        self.assertEqual(findings(self.plan(root)), [
+            'lock-differs skills-lock.json a-edited: changed since it was installed',
+            'lock-differs skills-lock.json a-gone: not in .agents/skills/'])
 
     def test_a_lock_file_that_is_not_one_is_found(self):
         """A skills-lock.json that is not the skills CLI's object differs."""
