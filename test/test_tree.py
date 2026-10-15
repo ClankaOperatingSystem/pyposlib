@@ -1064,7 +1064,8 @@ class Trees(unittest.TestCase):
         """Each difference is found: entries by name, then sources as
         declared. An entry of another ref, a skill named and not installed,
         and a source not installed differ; an entry of a skill its source
-        does not name, and one of no declared source, are undeclared."""
+        does not name is undeclared, and one of no declared source is
+        wild-caught."""
         root = repository(self.path('root'), {
             '.clanka/config.yml': ('pos: 2\nmethodologies:\n'
                                    '  - source: https://example.org/a.git\n    ref: v2\n'
@@ -1081,7 +1082,7 @@ class Trees(unittest.TestCase):
         self.assertEqual(findings(self.plan(root)), [
             'lock-differs skills-lock.json a-x: v1 installed, v2 declared',
             'lock-undeclared skills-lock.json b-three: not among the skills of git@example.org:b.git',
-            'lock-undeclared skills-lock.json z-other: from someone/skills, which is not declared',
+            'wild-caught skills-lock.json z-other: from someone/skills, which is not declared',
             'lock-differs skills-lock.json b-two: not installed from git@example.org:b.git',
             'lock-differs skills-lock.json https://example.org/c.git at v1: not installed'])
 
@@ -1128,7 +1129,7 @@ class Trees(unittest.TestCase):
 
     def test_each_node_compares_its_own_lock_file(self):
         """A node with no sources has each entry of its lock file
-        undeclared. A project that is a directory of the repository
+        wild-caught. A project that is a directory of the repository
         compares its own."""
         root = repository(self.path('root'), {
             **config('  - path: projects/p\n'),
@@ -1136,7 +1137,7 @@ class Trees(unittest.TestCase):
             'projects/p/.clanka/config.yml':
                 'pos: 2\nmethodologies:\n  - source: https://example.org/a.git\n    ref: v1\n'})
         self.assertEqual(findings(self.plan(root)), [
-            'lock-undeclared skills-lock.json grill-me: from someone/skills, which is not declared',
+            'wild-caught skills-lock.json grill-me: from someone/skills, which is not declared',
             'lock-differs projects/p/skills-lock.json https://example.org/a.git at v1: not installed'])
 
 

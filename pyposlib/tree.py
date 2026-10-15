@@ -423,7 +423,8 @@ def lock_differences(directory, config, image=None):
     """How the skills-lock.json at directory, a node's, differs from
     config's sources, as doc/pos-directory.txt section 6 has it. image, if
     given, is one source more, as lock_image gives it. A list of dicts of
-    finding, lock-differs or lock-undeclared; skill, the skill's name or
+    finding, lock-differs, lock-undeclared or wild-caught: an entry of a
+    source config does not declare; skill, the skill's name or
     None; and detail. An entry of a declared source at its ref differs
     where its skill's directory in .agents/skills/ is not there, or has
     another hash than computedHash. The entries come by name, then the
@@ -449,7 +450,7 @@ def lock_differences(directory, config, image=None):
         source = by_key.get(_lock_key(entry))
         locked = entry.get('ref')
         if source is None:
-            find('lock-undeclared', name, f'{name}: from {entry["source"]}, which is not declared')
+            find('wild-caught', name, f'{name}: from {entry["source"]}, which is not declared')
         elif source['skills'] is not None and name not in source['skills']:
             find('lock-undeclared', name, f'{name}: not among the skills of {source["source"]}')
         elif locked != source['ref']:
