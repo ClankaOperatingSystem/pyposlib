@@ -166,7 +166,7 @@ def summary(plan):
     for action in plan['actions']:
         lines.append({'exclude': 'exclude {repository} {path}', 'clone': 'clone {path}',
                       'archive-excludes': 'archive-excludes {repository}',
-                      'install': 'install {path} {version}', 'note': 'note {path}',
+                      'install': 'install {path} {version}',
                       'link': 'link {path} -> {target}', 'unlink': 'unlink {path}'}
                      [action['do']].format(**action))
     return lines + [f'{finding["finding"]} {finding["path"]}' for finding in plan['findings']]
@@ -714,12 +714,10 @@ class Trees(unittest.TestCase):
             self.assertEqual(Path(directory, '.clanka/auto/version').read_text(), '1\n')
             self.assertFalse(os.path.islink(os.path.join(directory, '.agents/skills/clankos-capture')))
             self.assertTrue(os.path.exists(os.path.join(directory, '.agents/skills/clankos-capture/SKILL.md')))
-            self.assertEqual(os.readlink(os.path.join(directory, '.claude/skills')), '../.agents/skills')
         self.assertEqual(os.readlink(os.path.join(root, 'bin/pos-capture')), '../.clanka/auto/bin/pos-capture')
         self.assertTrue(os.access(os.path.join(root, 'bin/pos-capture'), os.X_OK))
         self.assertFalse(os.path.exists(os.path.join(in_child, 'bin')))
         self.assertEqual(names(in_product), ['release'])
-        self.assertFalse(os.path.lexists(os.path.join(in_product, '.claude')))
         self.assertFalse(os.path.exists(os.path.join(in_product, '.clanka')))
         for directory in (root, in_child, in_product):
             self.assertEqual(status(directory), '')
@@ -730,8 +728,7 @@ class Trees(unittest.TestCase):
         self.assertEqual(summary(self.plan(root)), [])
 
     def test_a_repository_with_no_configuration_is_left_alone(self):
-        """Nothing is installed in it, its own skills are not read, and no
-        .claude/skills link is made."""
+        """Nothing is installed in it, and its own skills are not read."""
         given = source(self.path('source'), '1', 'clankos-capture')
         root = repository(self.path('root'), skill('own'))
         self.assertEqual(summary(self.plan(root, given)), [])
@@ -822,69 +819,6 @@ class Trees(unittest.TestCase):
                           {'.clanka/config.yml': text() + 'bin: bin\n', 'bin': 'a file\n'})
         self.assertEqual(summary(self.settle(root, given)), ['name-taken bin'])
         self.assertEqual(Path(root, 'bin').read_text(), 'a file\n')
-
-    def test_an_ordinary_claude_skills_has_the_links_and_a_note(self):
-        """A real .claude/skills directory gets the skill links too, and a
-        note that names what in it is no skill. Once the directory is
-        replaced by a link, the note is removed from where it was moved to."""
-        root = repository(self.path('root'),
-                          {'.clanka/config.yml': text('  - path: projects/p\n'),
-                           'projects/p/.clanka/config.yml': project('  - path: methodologies/notes\n'),
-                           'projects/p/.claude/skills/old/SKILL.md': '---\nname: old\n---\n',
-                           'projects/p/.claude/skills/loose.md': 'Not a skill.\n',
-                           **beneath('projects/p/methodologies/notes', method('notes'))})
-        in_project = os.path.join(root, 'projects/p')
-        self.assertEqual(summary(self.settle(root)), [])
-        for within in ('.agents/skills', '.claude/skills'):
-            self.assertEqual(os.readlink(os.path.join(in_project, within, 'notes-greet')),
-                             '../../methodologies/notes/skills/notes-greet')
-        note = Path(in_project, '.claude/skills', tree.NOTE)
-        self.assertRegex(note.read_text(), r'(?m)^  loose\.md$')
-        self.assertNotRegex(note.read_text(), r'(?m)^  old$')
-        self.assertEqual(status(root), '')
-        # The person moves everything and replaces the directory by a link.
-        note.rename(Path(in_project, '.agents/skills', tree.NOTE))
-        shutil.rmtree(os.path.join(in_project, '.claude/skills'))
-        os.symlink('../.agents/skills', os.path.join(in_project, '.claude/skills'))
-        self.assertEqual(summary(self.plan(root)), ['unlink projects/p/.agents/skills/README.clankos'])
-        self.assertEqual(summary(self.settle(root)), [])
-        self.assertEqual(names(in_project), ['notes-greet'])
-
-    def test_a_claude_path_that_is_not_a_directory_is_left(self):
-        """A file, a link or a dangling link at .claude or .claude/skills is
-        left, in a mounted repository too. The skills installed are kept all
-        the same, and the tree is clean after."""
-        for path in ('.claude', '.claude/skills'):
-            for kind in ('file', 'link', 'dangling'):
-                with self.subTest(path=path, kind=kind):
-                    case = self.path(path.replace('/', '-') + '-' + kind)
-                    given = source(os.path.join(case, 'source'), '1', 'clankos-capture')
-                    origin = repository(os.path.join(case, 'origins/child'),
-                                        {'.clanka/config.yml': text()})
-                    at = Path(origin, path)
-                    at.parent.mkdir(parents=True, exist_ok=True)
-                    if kind == 'file':
-                        at.write_text('existing\n')
-                    else:
-                        target = Path(origin, 'foreign')
-                        if kind == 'link':
-                            write(target, 'skills/private/SKILL.md', 'private\n')
-                        at.symlink_to(target)
-                    commit(origin)
-                    root = repository(os.path.join(case, 'root'),
-                                      {'.clanka/config.yml': text(child('child', origin))})
-                    self.settle(root, given)
-                    mounted = Path(root, 'child')
-                    for directory in (root, str(mounted)):
-                        install(directory, given)
-                    self.assertEqual(summary(self.settle(root, given)), [])
-                    self.assertEqual(status(mounted), '')
-                    self.assertEqual(names(mounted), ['clankos-capture'])
-                    if kind == 'file':
-                        self.assertEqual((mounted / path).read_text(), 'existing\n')
-                    else:
-                        self.assertEqual(os.readlink(mounted / path), os.readlink(at))
-                    self.assertEqual(summary(self.plan(root, given)), [])
 
     def test_a_link_an_earlier_tool_made_is_removed(self):
         """A link from one repository's skills to another's is removed: from
@@ -1007,7 +941,6 @@ class Trees(unittest.TestCase):
         self.assertEqual(os.readlink(os.path.join(in_project, 'bin/pos-capture')), '../.clanka/auto/bin/pos-capture')
         self.assertTrue(os.path.exists(os.path.join(in_project, '.agents/skills/hello-greet/SKILL.md')))
         self.assertEqual(names(in_project, '.clanka/auto/bin'), ['pos-capture'])
-        self.assertEqual(os.readlink(os.path.join(in_project, '.claude/skills')), '../.agents/skills')
         for repo in (root, in_project, os.path.join(in_project, 'methodologies/hello')):
             self.assertEqual(status(repo), '')
         self.assertEqual(summary(self.plan(root, given)), [])
@@ -1027,7 +960,6 @@ class Trees(unittest.TestCase):
                          '../../methodologies/notes/skills/notes-greet')
         self.assertEqual(os.readlink(os.path.join(in_project, 'bin/notes-take')),
                          '../methodologies/notes/bin/notes-take')
-        self.assertEqual(os.readlink(os.path.join(in_project, '.claude/skills')), '../.agents/skills')
         self.assertEqual(names(in_project), ['notes-greet'])
         self.assertEqual(names(root), [])
         self.assertEqual(status(root), '')
@@ -1107,25 +1039,6 @@ class Trees(unittest.TestCase):
         self.assertEqual(names(root), ['tidy-greet'])
         self.assertEqual(os.readlink(os.path.join(root, 'work/.agents/skills/trade-greet')),
                          '../../methodologies/trade/skills/trade-greet')
-
-    def test_a_skill_named_as_another_above_it_is_found(self):
-        """Two skills of one name along a line of directories are found. A
-        coding agent shows a session the skills of each directory above it in
-        the repository. Here work/desk has a skill tidy that is not the
-        root's, and one greet that is the root's text exactly; work/shelf has
-        none of either name, and a mounted child is another repository."""
-        def own(prefix, name, text):
-            return {f'{prefix}.agents/skills/{name}/SKILL.md': text}
-        origin = repository(self.path('origins/child'),
-                            {'.clanka/config.yml': 'pos: 2\n', **own('', 'tidy', "The child's.\n")})
-        root = repository(self.path('root'), {
-            **config(child('mounted', origin)),
-            **own('', 'tidy', "The root's.\n"), **own('', 'greet', 'Hello.\n'),
-            **own('work/desk/', 'tidy', "The desk's.\n"), **own('work/desk/', 'greet', 'Hello.\n'),
-            **own('work/shelf/', 'sort', "The shelf's.\n")})
-        made = self.settle(root)
-        self.assertEqual(summary(made), ['name-repeated work/desk/.agents/skills/tidy'])
-        self.assertEqual(made['findings'][0]['detail'], '.agents/skills/tidy')
 
     def test_two_methodologies_supplying_one_name_are_found(self):
         """Where two methodologies supply one command, the first is linked.
