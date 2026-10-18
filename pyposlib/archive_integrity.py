@@ -49,11 +49,13 @@ CONFIG_PATHS = tuple(f'{directory}/{name}' for directory in CONFIG_DIRECTORIES f
 
 
 class Refused(ValueError):
-    """A refusal of a kind poslib's doc/formats.org names."""
+    """A refusal of a kind poslib's doc/formats.org names; one at a scope
+    names the scope and the paths it refuses, sorted."""
 
-    def __init__(self, kind, message):
+    def __init__(self, kind, message, scope=None, paths=()):
         super().__init__(message)
         self.kind = kind
+        self.scope, self.paths = scope, list(paths)
 
 
 def encoded(value):
@@ -163,6 +165,20 @@ def config_files(directory):
     one, as poslib's doc/pos-directory.txt allows, or none. Two are refused
     by whoever reads them."""
     return [path for path in CONFIG_PATHS if os.path.exists(os.path.join(directory, path))]
+
+
+def archive_paths():
+    """Every path a scope's archive may have, relative to the scope: in each
+    configuration directory, then the visible archives of the legacy layout."""
+    return [f'{directory}/archives' for directory in CONFIG_DIRECTORIES] + ['archives']
+
+
+def archive_scope(archive):
+    """The scope archive, a directory named archives, belongs to: the
+    directory holding it, or, where that is a configuration directory, the
+    directory holding that."""
+    parent = Path(os.path.abspath(archive)).parent
+    return parent.parent if parent.name in CONFIG_DIRECTORIES else parent
 
 
 def entry_of(archive):
@@ -296,6 +312,147 @@ def ledger_folder(archive):
     if len(present) > 1:
         raise Refused('ledger', f'Two ledgers for one archive: {archive}')
     return present[0] if present else inside
+
+
+ACTIONS = {
+    'config': 'correct the configuration',
+    'link': 'replace the symbolic link with a directory',
+    'root': 'make the archive path a directory',
+    'ledger': 'make the ledger path a directory',
+    'checkpoint': 'make the checkpoint path a directory',
+    'directory-ambiguity': 'add a configuration, or relocate the bookkeeping into one directory',
+    'archive-location': 'keep one archive, after checking the history of each',
+    'ledger-location': 'keep one ledger, after checking the history of each',
+    'checkpoint-location': 'keep one checkpoint directory, after checking each',
+    'relocation-required': 'relocate the archive and its bookkeeping into the selected directory',
+}  # the action each refusal of a scope's layout requires
+
+
+def refuse_at(kind, scope, paths, message):
+    """Refuse kind at scope, naming paths: the message says the scope, the
+    paths sorted and the action kind requires."""
+    paths = sorted(str(p) for p in paths)
+    raise Refused(kind, f"{message}; scope {scope}; {', '.join(paths) or 'no path'}; {ACTIONS[kind]}",
+                  str(scope), paths)
+
+
+def probe(scope, path, kind):
+    """path if it is a directory, None if nothing is there. Refuses 'link'
+    for a symbolic link, and kind for anything else there."""
+    if path.is_symlink():
+        refuse_at('link', scope, [path], 'Symbolic link')
+    if path.is_dir():
+        return path
+    if path.exists():
+        refuse_at(kind, scope, [path], 'Not a directory')
+    return None
+
+
+def select(scope):
+    """The name of the directory selected for scope's archive and ledger: the
+    configuration directory holding scope's one configuration file, else its
+    one configuration directory, else .clankos, which need not exist.
+    Refuses 'link' for a symbolic link at a configuration directory or file,
+    'config' for something else there, for two configuration files and for
+    one doc/pos-directory.txt refuses, and 'directory-ambiguity' for two
+    configuration directories and no file."""
+    scope = Path(os.path.abspath(scope))
+    directories = [name for name in CONFIG_DIRECTORIES if probe(scope, scope / name, 'config')]
+    files = []
+    for name in directories:
+        for config in CONFIG_NAMES:
+            file = scope / name / config
+            if file.is_symlink():
+                refuse_at('link', scope, [file], 'Symbolic link')
+            if file.is_file():
+                files.append(file)
+            elif file.exists():
+                refuse_at('config', scope, [file], 'Not a configuration file')
+    if len(files) > 1:
+        refuse_at('config', scope, files, 'Two configurations')
+    if files:
+        from . import tree  # needs PyYAML, which only a configured node asks for
+        try:
+            tree.read_config(files[0].read_bytes().decode('utf-8', 'replace'))
+        except Refused as refused:
+            refuse_at('config', scope, files, f'Configuration refused ({refused.kind})')
+        return files[0].parent.name
+    if len(directories) > 1:
+        refuse_at('directory-ambiguity', scope, [scope / name for name in directories],
+                  'Several configuration directories and no configuration')
+    return directories[0] if directories else '.clankos'
+
+
+def locations(scope):
+    """Where scope's archive and bookkeeping are: a dict of the scope and the
+    one existing archive, ledger and checkpoints directory, or None, and the
+    components, the archives, archive-integrity and legacy checkpoint
+    directories at the scope, sorted. Each configuration directory and the
+    scope itself are probed; nothing is written. Refuses 'archive-location',
+    'ledger-location' or 'checkpoint-location' where two of one are found,
+    and a symbolic link or a file where a directory would be."""
+    scope = Path(os.path.abspath(scope))
+    holders = [p for p in (scope / name for name in CONFIG_DIRECTORIES) if probe(scope, p, 'config')]
+    archives, ledgers, checkpoints, components = [], [], [], []
+    for holder in [*holders, scope]:
+        archive = probe(scope, holder / 'archives', 'root')
+        integrity = probe(scope, holder / INTEGRITY, 'ledger')
+        if archive:
+            archives.append(archive)
+            components.append(archive)
+            if inside := probe(scope, archive / META, 'ledger'):
+                ledgers.append(inside)
+        if integrity:
+            components.append(integrity)
+            if ledger := probe(scope, integrity / 'ledger', 'ledger'):
+                ledgers.append(ledger)
+            if folder := probe(scope, integrity / 'checkpoints', 'checkpoint'):
+                checkpoints.append(folder)
+    if anchors := probe(scope, scope / ANCHORS, 'checkpoint'):
+        checkpoints.append(anchors)
+        components.append(anchors)
+    for kind, found, what in (('archive-location', archives, 'archives'),
+                              ('ledger-location', ledgers, 'ledgers'),
+                              ('checkpoint-location', checkpoints, 'checkpoint directories')):
+        if len(found) > 1:
+            refuse_at(kind, scope, found, f'Two {what} at one scope')
+    return dict(scope=scope, archive=next(iter(archives), None), ledger=next(iter(ledgers), None),
+                checkpoints=next(iter(checkpoints), None), components=sorted(components, key=str))
+
+
+def paired_archive(ledger):
+    """The archive the ledger folder ledger belongs to: the archives beside
+    its archive-integrity directory, or, for a legacy ledger, the archive
+    holding it."""
+    return ledger.parent if ledger.name == META else ledger.parent.parent / 'archives'
+
+
+def root_scope(root):
+    """The scope of root: root, or its archive's scope if it is named archives."""
+    root = Path(os.path.abspath(root))
+    return archive_scope(root) if root.name == 'archives' else root
+
+
+def coverage(root):
+    """What a checkpoint of root covers: archive if it is named so, else tree."""
+    return 'archive' if Path(root).name == 'archives' else 'tree'
+
+
+def targets(scope):
+    """Where a writer at scope writes: a dict of the scope, the name of the
+    directory select selects, and the archive, ledger folder and checkpoint
+    folder there, which need not exist. Nothing is created. Refuses
+    'relocation-required' where an archive, an archive-integrity directory
+    or legacy checkpoints are anywhere else at the scope."""
+    scope = Path(os.path.abspath(scope))
+    selected = select(scope)
+    base = scope / selected
+    archive, integrity = base / 'archives', base / INTEGRITY
+    outside = [p for p in locations(scope)['components'] if p not in (archive, integrity)]
+    if outside:
+        refuse_at('relocation-required', scope, outside, f'Bookkeeping lies outside {base}')
+    return dict(scope=scope, selected=selected, archive=archive,
+                ledger=integrity / 'ledger', checkpoints=integrity / 'checkpoints')
 
 
 def is_cid(value):
