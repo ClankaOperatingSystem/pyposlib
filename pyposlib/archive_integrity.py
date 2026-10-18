@@ -20,7 +20,9 @@ events in archive-integrity/ledger/ beside it, and checkpoints of ledger heads
 in archive-integrity/checkpoints/; a legacy ledger inside the archive, in
 archives/.archive-integrity/, is still read. Nested historical archives,
 ledgers included, are ordinary preserved bytes, so a retired scope's archive
-moves unchanged into its parent's.
+moves unchanged into its parent's. A scope's archive and its archive-integrity/
+lie in its configuration directory, .clanka, .clankos or .pos, or, in the
+legacy layout, beside it; select, locations and targets say which.
 
 The command line is poslib's pos-seal-batch, command for command: seal.py
 seals; check, checkpoint and repair are here, and read either ledger schema.
@@ -184,13 +186,13 @@ def archive_scope(archive):
 def entry_of(archive):
     """The entry for archive's scope in its node's configuration, or None.
 
-    The archive's scope is the directory holding it, and its node the
-    nearest directory at or above the scope that holds a configuration, as
+    The archive's scope is the directory holding it, or holding the
+    configuration directory that holds it, and its node the nearest directory at or above the scope that holds a configuration, as
     doc/pos-directory.txt names one. The entry is the one under archives
     there whose scope is the scope's path from the node; there is none for
     a scope it does not name, or beneath no node. Refuses 'config' for a
     configuration that is refused, and for two in one node."""
-    scope = Path(os.path.abspath(archive)).parent
+    scope = archive_scope(archive)
     node, files = next(((part, found) for part in [scope, *scope.parents]
                         if (found := config_files(part))), (None, []))
     if len(files) > 1:
@@ -241,13 +243,19 @@ def as_named(archive, files):
 
 def kept_here(directory):
     """The archive of the scope directory, if a keeper keeps it and none is
-    here: the scope has a ledger beside where its archive would be, and no
-    archives."""
-    archive = directory / 'archives'
-    if (not archive.exists() and not archive.is_symlink()
-            and (directory / INTEGRITY / 'ledger').is_dir() and kept(archive)):
+    here: the scope has a ledger in an archive-integrity directory and no
+    archives, and the archive is the one beside that directory."""
+    found = locations(directory)
+    archive = found['ledger'] and paired_archive(found['ledger'])
+    if archive and not found['archive'] and kept(archive):
         return archive
     return None
+
+
+def archive_at(directory):
+    """The archive of the scope directory, or None: the one locations finds
+    there, else the archive a keeper keeps that its ledger names."""
+    return locations(directory)['archive'] or kept_here(directory)
 
 
 def kept_entries(archive, known):
@@ -260,25 +268,28 @@ def kept_entries(archive, known):
 
 def roots(root):
     """Discover outermost archive trees; ignore disposable/hidden active trees.
-    An archive a keeper keeps is found by its ledger, with no directory of its
-    own."""
+    At each directory the walk visits, root included, the configuration
+    directories are probed for an archive, as locations does; no other
+    hidden or underscored directory is entered, nor a found archive. An
+    archive a keeper keeps is found by its ledger, with no directory of its
+    own. A root named archives is its scope's archive."""
     root = checked(root).resolve()
-    if not root.is_dir() and not (root.name == 'archives' and kept_here(root.parent)):
-        raise Refused('root', 'Root must be an existing directory')
     if root.name == 'archives':
-        return [root]
+        if root.is_dir():
+            return [root]
+        if archive := kept_here(archive_scope(root)):
+            return [archive]
+        raise Refused('root', 'Root must be an existing directory')
+    if not root.is_dir():
+        raise Refused('root', 'Root must be an existing directory')
     found = []
     for here, dirs, files in os.walk(root, followlinks=False):
-        if kept_here(Path(here)):
-            found.append(Path(here) / 'archives')
-        dirs[:] = sorted(d for d in dirs if not d.startswith(('.', '_')))
-        for name in list(dirs):
-            p = Path(here) / name
-            if p.is_symlink():
-                raise Refused('link', f'Symlink in discovery: {p}')
-            if name == 'archives':
-                found.append(p)
-                dirs.remove(name)
+        if archive := archive_at(Path(here)):
+            found.append(archive)
+        dirs[:] = sorted(d for d in dirs if not d.startswith(('.', '_')) and d != 'archives')
+        for name in dirs:
+            if (Path(here) / name).is_symlink():
+                raise Refused('link', f'Symlink in discovery: {Path(here) / name}')
     return sorted(found)
 
 
@@ -306,7 +317,11 @@ def canonical_uuid(value):
 
 
 def ledger_folder(archive):
-    """The archive's ledger folder: beside it, else the legacy one inside."""
+    """The archive's ledger folder: beside it, else the legacy one inside.
+    For an archive named archives, the one ledger its scope has, wherever
+    locations finds it; with none, where it would be beside the archive."""
+    if Path(archive).name == 'archives':
+        return locations(archive_scope(archive))['ledger'] or Path(archive).parent / INTEGRITY / 'ledger'
     beside, inside = archive.parent / INTEGRITY / 'ledger', archive / META
     present = [f for f in (beside, inside) if f.exists() or f.is_symlink()]
     if len(present) > 1:
@@ -659,8 +674,9 @@ def differences(known, actual):
 
 
 def anchor_base(root):
-    root = checked(root).resolve()
-    return root.parent if root.name == 'archives' else root
+    """The scope whose checkpoints cover root: root itself, or its archive's
+    scope where root is named archives."""
+    return root_scope(checked(root).resolve())
 
 
 def anchor_home(root):
@@ -669,21 +685,29 @@ def anchor_home(root):
     return base / INTEGRITY / 'checkpoints' if (base / INTEGRITY).is_dir() else base / ANCHORS
 
 
-def anchor_homes(root):
-    base = anchor_base(root)
-    return {base / ANCHORS, base / INTEGRITY / 'checkpoints'}
+def checkpoint_home(archive):
+    """Where a new checkpoint of archive's head goes: its scope's one
+    checkpoint directory, if it has one; else beside archive's ledger, in
+    the archive-integrity directory there, or the legacy checkpoint
+    directory of its scope where the ledger is legacy and that directory is
+    absent."""
+    scope = archive_scope(archive)
+    existing, ledger = locations(scope)['checkpoints'], ledger_folder(archive)
+    beside = Path(os.path.abspath(archive)).parent
+    if existing:
+        return existing
+    if ledger.name != META:
+        return ledger.parent / 'checkpoints'
+    if (beside / INTEGRITY).is_dir():
+        return beside / INTEGRITY / 'checkpoints'
+    return scope / ANCHORS
 
 
 def checkpoint_files(root, archives):
-    folders = set(anchor_homes(root)).union(*(anchor_homes(a) for a in archives))
-    files = []
-    for folder in sorted(folders):
-        if not folder.exists() and not folder.is_symlink():
-            continue
-        if folder.is_symlink() or not folder.is_dir():
-            raise Refused('checkpoint', 'Invalid checkpoint directory')
-        files.extend(sorted(folder.iterdir()))
-    return files
+    """The checkpoint files covering root and archives: those in the one
+    checkpoint directory of each of their scopes."""
+    folders = {locations(anchor_base(p))['checkpoints'] for p in [root, *archives]} - {None}
+    return [file for folder in sorted(folders) for file in sorted(folder.iterdir())]
 
 
 def check_anchors(root, archives):
@@ -935,8 +959,11 @@ def apply_plan(plan, expected, checkpoint=lambda phase: None):
         prepared.append((archive, item, data, filename, done))
     checkpoint('validated')
     for archive, item, data, filename, done in prepared:
+        # A legacy ledger begins inside its archive.
+        folder = ledger_folder(archive)
+        folder = folder if folder.exists() else archive / META
         if not done:
-            new_file(ledger_folder(archive) / filename, data)
+            new_file(folder / filename, data)
         checkpoint('after-ledger')
         # Only protect the records selected by this operation and ledger files.
         for name in item['add']:
@@ -944,7 +971,7 @@ def apply_plan(plan, expected, checkpoint=lambda phase: None):
             if record(path) != item['add'][name]:
                 raise ValueError(f'File changed during enrolment: {path}')
             path.chmod(stat.S_IMODE(regular(path).st_mode) & ~0o222)
-        for path in ledger_folder(archive).iterdir():
+        for path in folder.iterdir():
             path.chmod(stat.S_IMODE(regular(path).st_mode) & ~0o222)
         checkpoint('after-protection')
     checkpoint_heads(root)

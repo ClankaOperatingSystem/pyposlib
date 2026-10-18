@@ -218,6 +218,16 @@ def layout(fixture, base):
         found = ai.locations(ai.root_scope(root))
         return dict(archive=rel(found['archive']), ledger=rel(found['ledger']),
                     checkpoints=rel(found['checkpoints']))
+    if fixture['operation'] == 'read':
+        found = ai.locations(ai.root_scope(root))
+        archive = found['archive'] or (found['ledger'] and ai.paired_archive(found['ledger']))
+        result = dict(archive=rel(found['archive']), ledger=rel(archive and ai.ledger_folder(archive)),
+                      checkpoints=rel(found['checkpoints']))
+        if archive:
+            _, result['head'], result['events'] = ai.history(archive)[:3]
+        return result
+    if fixture['operation'] == 'discover':
+        return dict(archives=[rel(archive) for archive in ai.roots(root)])
     target = ai.targets(ai.root_scope(root))
     return dict(selected=target['selected'], archive=rel(target['archive']), ledger=rel(target['ledger']),
                 checkpoints=rel(target['checkpoints']), coverage=ai.coverage(root))
@@ -227,10 +237,8 @@ class Layout(unittest.TestCase):
     def test_each_layout_case_gives_what_its_fixture_records(self):
         """Each case in fixtures/layout/ gives what it records, or is refused
         with the kind and the paths it records. None changes anything on
-        disk."""
+        disk, and discovery asks no keeper: none is reachable from here."""
         for name, fixture in fixtures('layout'):
-            if fixture['operation'] not in ('select', 'resolve', 'write-target'):
-                continue
             with self.subTest(name), Built(fixture) as built:
                 base = built.resolve()
                 before = snapshot(base)
