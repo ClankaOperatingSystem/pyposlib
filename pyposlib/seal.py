@@ -98,7 +98,8 @@ def fetch(uri, start=None, keeper_for=None):
     wanted, path = match[1], (match[2] or '').split('::')[0]
     here = Path(os.path.abspath(start or '.'))
     scopes = [d for d in [here, *here.parents]
-              if d.name != 'archives' and ((d / 'archives').is_dir() or ai.kept_here(d))]
+              if d.name not in ('archives', *ai.CONFIG_DIRECTORIES)
+              and (any((d / a).is_dir() for a in ai.archive_paths()) or ai.kept_here(d))]
 
     def places(scope, kept):
         """Each (archive, path within it) the link may name in scope's
@@ -256,9 +257,7 @@ def protect(path):
 
 def checkpoint(archive, head):
     data = encoded(dict(schema=1, heads=[head], coverage='archive'))
-    base = archive.parent
-    folder = base / ai.INTEGRITY / 'checkpoints' if (base / ai.INTEGRITY).is_dir() else base / ai.ANCHORS
-    path = folder / (sha(data) + '.json')
+    path = ai.checkpoint_home(archive) / (sha(data) + '.json')
     if not path.exists():
         ai.new_file(path, data)
 
