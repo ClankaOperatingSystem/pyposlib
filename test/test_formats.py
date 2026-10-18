@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """pyposlib against the fixtures it shares with poslib: every one must agree."""
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -197,6 +198,52 @@ class Formats(unittest.TestCase):
         for item in report:
             item['archive'] = Path(item['archive']).relative_to(base).as_posix()
         self.assertEqual(ai.encoded(fixture['report']), ai.encoded(report))
+
+
+def snapshot(root):
+    """Every path beneath root with its type, size and mode, sorted."""
+    return sorted((p.relative_to(root).as_posix(), p.is_symlink(), p.is_dir(), p.lstat().st_size,
+                   p.lstat().st_mode) for p in root.rglob('*'))
+
+
+def layout(fixture, base):
+    """What fixture's operation gives in base, as the fields it records."""
+    root = base / fixture['root']
+
+    def rel(path):
+        return None if path is None else Path(os.path.relpath(path, base)).as_posix()
+    if fixture['operation'] == 'select':
+        return dict(selected=ai.select(root))
+    if fixture['operation'] == 'resolve':
+        found = ai.locations(ai.root_scope(root))
+        return dict(archive=rel(found['archive']), ledger=rel(found['ledger']),
+                    checkpoints=rel(found['checkpoints']))
+    target = ai.targets(ai.root_scope(root))
+    return dict(selected=target['selected'], archive=rel(target['archive']), ledger=rel(target['ledger']),
+                checkpoints=rel(target['checkpoints']), coverage=ai.coverage(root))
+
+
+class Layout(unittest.TestCase):
+    def test_each_layout_case_gives_what_its_fixture_records(self):
+        """Each case in fixtures/layout/ gives what it records, or is refused
+        with the kind and the paths it records. None changes anything on
+        disk."""
+        for name, fixture in fixtures('layout'):
+            if fixture['operation'] not in ('select', 'resolve', 'write-target'):
+                continue
+            with self.subTest(name), Built(fixture) as built:
+                base = built.resolve()
+                before = snapshot(base)
+                if 'error' in fixture:
+                    with self.assertRaises(ai.Refused) as refused:
+                        layout(fixture, base)
+                    self.assertEqual(fixture['error'], refused.exception.kind)
+                    self.assertEqual(fixture['paths'], [Path(os.path.relpath(p, base)).as_posix()
+                                                        for p in refused.exception.paths])
+                else:
+                    for field, value in layout(fixture, base).items():
+                        self.assertEqual(fixture[field], value, field)
+                self.assertEqual(before, snapshot(base))
 
 
 class Kept(unittest.TestCase):
