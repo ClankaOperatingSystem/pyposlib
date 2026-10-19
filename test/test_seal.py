@@ -83,12 +83,12 @@ def run(fixture, root):
 
 
 class Scope:
-    """A temporary scope holding archives/ and an item, trial/."""
+    """A temporary scope holding an archive in its .clankos and an item, trial/."""
 
     def __enter__(self):
         self.dir = Path(tempfile.mkdtemp(prefix='pyposlib-seal-'))
         scope = self.dir / 'scope'
-        (scope / 'archives').mkdir(parents=True)
+        (scope / '.clankos/archives').mkdir(parents=True)
         write(scope / 'trial' / 'result.txt', b'result')
         return scope
 
@@ -98,7 +98,7 @@ class Scope:
 
 
 def trial_plan(scope):
-    return seal.plan(scope / 'trial', scope / 'archives' / 'trial')
+    return seal.plan(scope / 'trial', scope / '.clankos/archives' / 'trial')
 
 
 class Sealing(unittest.TestCase):
@@ -110,8 +110,8 @@ class Sealing(unittest.TestCase):
             before = cid.cid_directory(archive)
             plan = trial_plan(scope)
             seal.apply(plan, ai.sha(ai.encoded(plan)))
-            self.assertEqual(before, cid.cid_directory(scope / 'archives/trial/archives'))
-            self.assertTrue((scope / 'archives/trial/archives/old/_seal').is_dir())
+            self.assertEqual(before, cid.cid_directory(scope / '.clankos/archives/trial/archives'))
+            self.assertTrue((scope / '.clankos/archives/trial/archives/old/_seal').is_dir())
 
     def test_repair_restores_recorded_directories_after_a_clone(self):
         with Scope() as scope:
@@ -122,7 +122,7 @@ class Sealing(unittest.TestCase):
             plan = trial_plan(scope)
             seal.apply(plan, ai.sha(ai.encoded(plan)))
             metadata = {p.relative_to(scope): p.read_bytes()
-                        for p in (scope / 'archive-integrity').rglob('*') if p.is_file()}
+                        for p in (scope / '.clankos/archive-integrity').rglob('*') if p.is_file()}
             subprocess.run(['git', 'init', '-q', str(scope)], check=True)
             subprocess.run(['git', 'add', '.'], cwd=scope, check=True)
             subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.org',
@@ -133,10 +133,10 @@ class Sealing(unittest.TestCase):
             before = ai.report(clone, ask=False)[0]
             self.assertNotEqual(before['root'], before['recorded_root'])
             self.assertEqual(ai.repair(clone)['restored'], 2)
-            self.assertEqual((clone / 'archives/trial/result.txt').stat().st_mode & 0o777, 0o400)
+            self.assertEqual((clone / '.clankos/archives/trial/result.txt').stat().st_mode & 0o777, 0o400)
             self.assertFalse(any(ai.findings(r) for r in ai.report(clone, ask=False)))
             self.assertEqual(metadata, {p.relative_to(clone): p.read_bytes()
-                                       for p in (clone / 'archive-integrity').rglob('*') if p.is_file()})
+                                       for p in (clone / '.clankos/archive-integrity').rglob('*') if p.is_file()})
             self.assertEqual(ai.repair(clone), dict(repaired=0, restored=0, unregistered=0))
 
     def test_repair_validates_all_directories_before_writing(self):
@@ -146,7 +146,7 @@ class Sealing(unittest.TestCase):
                     (scope / 'trial' / name).mkdir(parents=True)
                 plan = trial_plan(scope)
                 seal.apply(plan, ai.sha(ai.encoded(plan)))
-                item = scope / 'archives/trial'
+                item = scope / '.clankos/archives/trial'
                 (item / 'a').rmdir()
                 (item / 'z/leaf').rmdir()
                 (item / 'z').rmdir()
@@ -173,7 +173,7 @@ class Sealing(unittest.TestCase):
         with Scope() as scope:
             plan = trial_plan(scope)
             _, root = seal.apply(plan, ai.sha(ai.encoded(plan)))
-            archive = scope / 'archives'
+            archive = scope / '.clankos/archives'
             self.assertEqual(cid.cid_tree(archive), ai.fold_cids(archive))
             self.assertEqual(root, ai.fold_cids(archive)['.'])
 
@@ -278,7 +278,7 @@ class Sealing(unittest.TestCase):
         with Scope() as scope:
             plan = trial_plan(scope)
             event, _ = seal.apply(plan, ai.sha(ai.encoded(plan)))
-            self.assertFalse((scope / 'archives/trial/result.txt').stat().st_mode & 0o222)
+            self.assertFalse((scope / '.clankos/archives/trial/result.txt').stat().st_mode & 0o222)
             self.assertEqual(event.stat().st_mode & 0o777, 0o444)
 
     def test_a_plan_is_applied_only_as_reviewed(self):
@@ -290,33 +290,33 @@ class Sealing(unittest.TestCase):
             with self.assertRaises(ai.Refused):
                 seal.apply(plan, ai.sha(ai.encoded(plan)))
             self.assertTrue((scope / 'trial/result.txt').exists())
-            self.assertFalse((scope / 'archives/trial').exists())
+            self.assertFalse((scope / '.clankos/archives/trial').exists())
 
     def test_an_interrupted_seal_resumes(self):
         with Scope() as scope:
             plan = trial_plan(scope)
             expected = ai.sha(ai.encoded(plan))
-            os.rename(scope / 'trial', scope / 'archives' / 'trial')
+            os.rename(scope / 'trial', scope / '.clankos/archives' / 'trial')
             first = seal.apply(plan, expected)
             self.assertEqual(first, seal.apply(plan, expected))
-            self.assertEqual(ai.history(scope / 'archives')[2], 1)
+            self.assertEqual(ai.history(scope / '.clankos/archives')[2], 1)
 
     def test_a_new_record_is_staged_then_sealed(self):
         with Scope() as scope:
-            plan = seal.stage(b'handover\n', scope / 'archives' / 'journal' / 'h.txt')
+            plan = seal.stage(b'handover\n', scope / '.clankos/archives' / 'journal' / 'h.txt')
             staged = Path(plan['source'])
             self.assertEqual(staged.parent, (scope / '_seal').resolve())
             self.assertEqual(staged.suffix, '.txt')
             seal.apply(plan, ai.sha(ai.encoded(plan)))
             self.assertFalse(staged.exists())
-            self.assertEqual((scope / 'archives/journal/h.txt').read_bytes(), b'handover\n')
+            self.assertEqual((scope / '.clankos/archives/journal/h.txt').read_bytes(), b'handover\n')
 
     def test_a_new_record_staged_again_replaces_the_first(self):
         """Staging for one destination twice leaves one staged file, the
         second's. The first plan is refused, the second seals, and _seal is
         gone."""
         with Scope() as scope:
-            target = scope / 'archives' / 'journal' / 'h.txt'
+            target = scope / '.clankos/archives' / 'journal' / 'h.txt'
             first = seal.stage(b'draft\n', target)
             second = seal.stage(b'handover\n', target)
             self.assertEqual(first['source'], second['source'])
@@ -330,24 +330,24 @@ class Sealing(unittest.TestCase):
 
     def test_a_new_record_may_start_an_archive(self):
         with Scope() as scope:
-            (scope / 'archives').rmdir()
-            plan = seal.stage(b'first\n', scope / 'archives' / 'first.txt')
+            (scope / '.clankos/archives').rmdir()
+            plan = seal.stage(b'first\n', scope / '.clankos/archives' / 'first.txt')
             self.assertEqual(plan['number'], 1)
             seal.apply(plan, ai.sha(ai.encoded(plan)))
-            self.assertEqual((scope / 'archives' / 'first.txt').read_bytes(), b'first\n')
-            self.assertTrue((scope / 'archive-integrity' / 'ledger').is_dir())
+            self.assertEqual((scope / '.clankos/archives' / 'first.txt').read_bytes(), b'first\n')
+            self.assertTrue((scope / '.clankos/archive-integrity' / 'ledger').is_dir())
 
     def test_a_refused_new_record_leaves_nothing_staged(self):
         with Scope() as scope:
-            write(scope / 'archives' / 'taken.txt', b'taken')
+            write(scope / '.clankos/archives' / 'taken.txt', b'taken')
             with self.assertRaises(ai.Refused):
-                seal.stage(b'new\n', scope / 'archives' / 'taken.txt')
+                seal.stage(b'new\n', scope / '.clankos/archives' / 'taken.txt')
             self.assertFalse((scope / '_seal').exists())
 
     def test_a_program_applies_its_own_plan_explicitly(self):
         import subprocess, sys
         with Scope() as scope:
-            target = scope / 'archives' / 'journal' / 'h.txt'
+            target = scope / '.clankos/archives' / 'journal' / 'h.txt'
             tool = Path(__file__).resolve().parent.parent / 'archive_integrity.py'
             command = [sys.executable, '-B', str(tool), 'write-new', str(target)]
             self.assertEqual(0, subprocess.run(command, input=b'handover\n', capture_output=True).returncode)
@@ -367,7 +367,7 @@ class Sealing(unittest.TestCase):
             write(scope / 'trial' / 'kept' / '_seal' / 'plan.json', b'{}')
             plan = trial_plan(scope)
             event, _ = seal.apply(plan, ai.sha(ai.encoded(plan)))
-            archive = scope / 'archives'
+            archive = scope / '.clankos/archives'
             self.assertEqual(json.loads(event.read_bytes())['empty'], ['trial/child', 'trial/hollow'])
             self.assertFalse((archive / 'trial' / '_seal').exists())
             self.assertFalse((archive / 'trial' / 'child' / '_seal').exists())
@@ -379,7 +379,7 @@ class Sealing(unittest.TestCase):
         gone; a _seal that holds something else stays."""
         with Scope() as scope:
             def sealed(name):
-                plan = seal.stage(b'record\n', scope / 'archives' / name)
+                plan = seal.stage(b'record\n', scope / '.clankos/archives' / name)
                 seal.apply(plan, ai.sha(ai.encoded(plan)))
             sealed('first.txt')
             self.assertFalse((scope / '_seal').exists())
@@ -393,7 +393,7 @@ class Sealing(unittest.TestCase):
         with Scope() as scope:
             plan = trial_plan(scope)
             seal.apply(plan, ai.sha(ai.encoded(plan)))
-            archive = scope / 'archives'
+            archive = scope / '.clankos/archives'
             found = ai.fold_cids(archive)['trial']
             self.assertEqual(seal.link(archive / 'trial'), f'ipfs://{found}')
             self.assertEqual(seal.link(f'{archive}/trial/'), f'ipfs://{found}')
@@ -409,11 +409,11 @@ class Sealing(unittest.TestCase):
         with Scope() as scope:
             plan = trial_plan(scope)
             seal.apply(plan, ai.sha(ai.encoded(plan)))
-            target = scope / 'archives' / 'trial' / 'result.txt'
+            target = scope / '.clankos/archives' / 'trial' / 'result.txt'
             tool = Path(__file__).resolve().parent.parent / 'archive_integrity.py'
             done = subprocess.run([sys.executable, '-B', str(tool), 'link', str(target)], capture_output=True)
             self.assertEqual((done.returncode, done.stdout.decode()), (0, seal.link(target) + '\n'))
-            done = subprocess.run([sys.executable, '-B', str(tool), 'link', str(scope / 'archives' / 'other')],
+            done = subprocess.run([sys.executable, '-B', str(tool), 'link', str(scope / '.clankos/archives' / 'other')],
                                   capture_output=True)
             self.assertEqual((done.returncode, done.stdout), (2, b''))
 
@@ -425,7 +425,7 @@ class Sealing(unittest.TestCase):
         with Scope() as scope:
             plan = trial_plan(scope)
             seal.apply(plan, ai.sha(ai.encoded(plan)))
-            cids = ai.fold_cids(scope / 'archives')
+            cids = ai.fold_cids(scope / '.clankos/archives')
             item, file = cids['trial'], cids['trial/result.txt']
             (scope / 'canon').mkdir()
             for uri in (f'ipfs://{item}/result.txt', f'ipfs://{item}/result.txt::*A heading',
@@ -445,7 +445,7 @@ class Sealing(unittest.TestCase):
             write(scope / 'trial' / 'bytes.bin', data)
             plan = trial_plan(scope)
             seal.apply(plan, ai.sha(ai.encoded(plan)))
-            item = ai.fold_cids(scope / 'archives')['trial']
+            item = ai.fold_cids(scope / '.clankos/archives')['trial']
             tool = Path(__file__).resolve().parent.parent / 'archive_integrity.py'
             done = subprocess.run([sys.executable, '-B', str(tool), 'fetch', f'ipfs://{item}/bytes.bin'],
                                   capture_output=True, cwd=scope)
@@ -486,7 +486,7 @@ class KeptScope:
         return remote.HttpRemoteArchive(KEEPER, None, send)
 
     def seal(self, item, keeper=None):
-        plan = seal.plan(self.scope / item, self.scope / 'archives' / item, LEDGER)
+        plan = seal.plan(self.scope / item, self.scope / '.clankos/archives' / item, LEDGER)
         return seal.apply(plan, ai.sha(ai.encoded(plan)), keeper=self.client(keeper), claims={})
 
 
@@ -497,7 +497,7 @@ class SealingToAKeeper(unittest.TestCase):
         are refused as entry."""
         with KeptScope() as kept:
             kept.seal('trial')
-            cids = ai.fold_cids(kept.scope / 'archives')
+            cids = ai.fold_cids(kept.scope / '.clankos/archives')
             for uri in (f'ipfs://{cids["trial"]}/result.txt', f'ipfs://{cids["trial/result.txt"]}'):
                 self.assertEqual(seal.fetch(uri, kept.scope, keeper_for=lambda url: kept.client()), b'result')
             with self.assertRaises(ai.Refused) as refused:
@@ -516,12 +516,12 @@ class SealingToAKeeper(unittest.TestCase):
         nothing of the item is left on disk."""
         with KeptScope() as kept:
             event, root = kept.seal('trial')
-            cids = ai.fold_cids(kept.scope / 'archives')
+            cids = ai.fold_cids(kept.scope / '.clankos/archives')
             self.assertEqual(root, cids['.'])
             self.assertEqual(b'result', kept.keeper.read(cids['trial'], 'result.txt'))
             self.assertEqual(event.read_bytes(), kept.keeper.event(1))
             self.assertFalse((kept.scope / 'trial').exists())
-            self.assertFalse((kept.scope / 'archives').exists())
+            self.assertFalse((kept.scope / '.clankos/archives').exists())
 
     def test_a_keeper_ahead_with_another_ledger_leaves_this_one_as_it_was(self):
         """Events fetched to catch up that do not continue the ledger are
@@ -533,11 +533,11 @@ class SealingToAKeeper(unittest.TestCase):
             other.seal('trial')
             other.seal('more')
             write(kept.scope / 'next/n.txt', b'next')
-            before = sorted(p.name for p in (kept.scope / 'archive-integrity/ledger').iterdir())
+            before = sorted(p.name for p in (kept.scope / '.clankos/archive-integrity/ledger').iterdir())
             with self.assertRaises(ai.Refused) as refused:
                 kept.seal('next', keeper=other.keeper)
             self.assertEqual('chain', refused.exception.kind)
-            self.assertEqual(before, sorted(p.name for p in (kept.scope / 'archive-integrity/ledger').iterdir()))
+            self.assertEqual(before, sorted(p.name for p in (kept.scope / '.clankos/archive-integrity/ledger').iterdir()))
             self.assertTrue((kept.scope / 'next/n.txt').exists())
 
     def test_another_client_s_seal_is_fetched_and_the_plan_made_before_it_refused(self):
@@ -546,12 +546,12 @@ class SealingToAKeeper(unittest.TestCase):
         against the ledger as it was, is refused for a new one."""
         with KeptScope() as kept, KeptScope() as clone:
             write(clone.scope / 'more/m.txt', b'more')
-            plan = seal.plan(clone.scope / 'more', clone.scope / 'archives/more', LEDGER)
+            plan = seal.plan(clone.scope / 'more', clone.scope / '.clankos/archives/more', LEDGER)
             event, _ = kept.seal('trial')
             with self.assertRaises(ai.Refused) as refused:
                 seal.apply(plan, ai.sha(ai.encoded(plan)), keeper=clone.client(kept.keeper), claims={})
             self.assertEqual('plan', refused.exception.kind)
-            self.assertEqual([event.name], [p.name for p in ai.history(clone.scope / 'archives')[3]])
+            self.assertEqual([event.name], [p.name for p in ai.history(clone.scope / '.clankos/archives')[3]])
             self.assertTrue((clone.scope / 'more/m.txt').exists())
             clone.seal('more', keeper=kept.keeper)
             self.assertEqual(2, kept.keeper.describe()['events'])
@@ -560,7 +560,7 @@ class SealingToAKeeper(unittest.TestCase):
         """Resumed after the keeper has the event, a seal removes the item
         only if it is still what was sealed."""
         with KeptScope() as kept:
-            plan = seal.plan(kept.scope / 'trial', kept.scope / 'archives/trial', LEDGER)
+            plan = seal.plan(kept.scope / 'trial', kept.scope / '.clankos/archives/trial', LEDGER)
             digest = ai.sha(ai.encoded(plan))
             file, _, data = seal.event_of(plan, 'trial', plan['add'], plan['collections'], [])
             kept.keeper.append(file, data, {plan['add']['trial/result.txt']['cid']: b'result'}, {})
@@ -574,7 +574,7 @@ class SealingToAKeeper(unittest.TestCase):
         """A plan says whether its archive is with a keeper, and which: one
         made before the scope's configuration changed is refused."""
         with KeptScope() as kept:
-            plan = seal.plan(kept.scope / 'trial', kept.scope / 'archives/trial', LEDGER)
+            plan = seal.plan(kept.scope / 'trial', kept.scope / '.clankos/archives/trial', LEDGER)
             self.assertEqual(KEEPER, plan['kept'])
             (kept.dir / '.pos/config.yaml').write_text('pos: 2\nprojects: projects/\n')
             with self.assertRaises(ai.Refused) as refused:
@@ -590,9 +590,9 @@ class SealingToAKeeper(unittest.TestCase):
             (kept.dir / '.pos/config.yaml').write_text('pos: 2\nprojects: projects/\n')
             write(kept.scope / 'more/deep/m.txt', b'more')
             for item in ('trial', 'more'):
-                plan = seal.plan(kept.scope / item, kept.scope / 'archives' / item, LEDGER)
+                plan = seal.plan(kept.scope / item, kept.scope / '.clankos/archives' / item, LEDGER)
                 seal.apply(plan, ai.sha(ai.encoded(plan)))
-            archive = kept.scope / 'archives'
+            archive = kept.scope / '.clankos/archives'
             before = {path: (archive / path).read_bytes() for path in ai.inventory(archive)}
             write(kept.dir / '.pos/config.yaml',
                   f'pos: 2\nprojects: projects/\narchives:\n  - scope: projects/a\n    kept: remote\n    url: {KEEPER}\n'.encode())
@@ -643,7 +643,7 @@ class SealingToAKeeper(unittest.TestCase):
             git('remote', 'add', 'mirror', 'git@forge.example:some/one.git')
             git('add', '.pos')
             git('commit', '-q', '-m', 'Configure')
-            plan = seal.plan(kept.scope / 'trial', kept.scope / 'archives/trial', LEDGER)
+            plan = seal.plan(kept.scope / 'trial', kept.scope / '.clankos/archives/trial', LEDGER)
             self.assertEqual(
                 {'plan': 'the hash', 'tool': 'pyposlib',
                  'tool_commit': 'eac849ed9d3162cf11017715f771458b1d4e60b5', 'scope': 'projects/a',
@@ -655,9 +655,61 @@ class SealingToAKeeper(unittest.TestCase):
     def test_claims_outside_a_repository_git_reads_say_what_is_known(self):
         with KeptScope() as kept, tempfile.TemporaryDirectory() as tool, \
                 unittest.mock.patch.object(seal, 'TOOL_DIRECTORY', Path(tool)):
-            plan = seal.plan(kept.scope / 'trial', kept.scope / 'archives/trial', LEDGER)
+            plan = seal.plan(kept.scope / 'trial', kept.scope / '.clankos/archives/trial', LEDGER)
             self.assertEqual({'plan': 'the hash', 'tool': 'pyposlib', 'scope': 'projects/a'},
                              seal.claims_of(plan, 'the hash'))
+
+
+
+class WhereAWriterWrites(unittest.TestCase):
+    def test_a_writer_writes_in_the_selected_directory(self):
+        """A seal and a checkpoint at a scope write in the directory selected
+        there. For each configuration directory, holding the scope's
+        configuration or standing bare, and for none, where .clankos is made:
+        the archive and its bookkeeping are made there, nothing visible beside
+        them, and no configuration file is made."""
+        for directory, config in (('.clanka', 'config.yaml'), ('.clankos', 'config.yml'),
+                                  ('.pos', 'config.yaml'), ('.clanka', None), ('.pos', None), (None, None)):
+            with self.subTest(directory=directory, config=config), Scope() as scope:
+                scope = scope.resolve()
+                (scope / '.clankos/archives').rmdir()
+                (scope / '.clankos').rmdir()
+                selected = directory or '.clankos'
+                if config:
+                    write(scope / directory / config, b'pos: 2\n')
+                elif directory:
+                    (scope / directory).mkdir()
+                plan = seal.plan(scope / 'trial', scope / 'archives/trial')
+                self.assertEqual(str(scope / selected / 'archives'), plan['archive'])
+                seal.apply(plan, ai.sha(ai.encoded(plan)))
+                self.assertEqual(scope / selected / 'archive-integrity/checkpoints', ai.checkpoint_root(scope))
+                self.assertTrue((scope / selected / 'archives/trial/result.txt').exists())
+                self.assertTrue((scope / selected / 'archive-integrity/ledger').is_dir())
+                self.assertFalse((scope / 'archives').exists())
+                self.assertFalse((scope / 'archive-integrity').exists())
+                if not config:
+                    self.assertEqual([], ai.config_files(scope))
+
+    def test_a_writer_refuses_an_archive_beside_its_scope(self):
+        """A visible archives/ or archive-integrity/ at a scope refuses every
+        writer. Sealing, staging a new record and checkpointing are refused as
+        relocation-required, naming what lies beside the scope, and nothing is
+        moved or made."""
+        for beside in ('archives', 'archive-integrity'):
+            with self.subTest(beside), Scope() as scope:
+                scope = scope.resolve()
+                (scope / '.clankos/archives').rmdir()
+                (scope / '.clankos').rmdir()
+                (scope / beside).mkdir()
+                for writer in (lambda: seal.plan(scope / 'trial', scope / 'archives/trial'),
+                               lambda: seal.stage(b'new\n', scope / 'archives/new.txt'),
+                               lambda: ai.checkpoint_root(scope)):
+                    with self.assertRaises(ai.Refused) as refused:
+                        writer()
+                    self.assertEqual('relocation-required', refused.exception.kind)
+                    self.assertEqual([str(scope / beside)], refused.exception.paths)
+                self.assertEqual(sorted([beside, 'trial']), sorted(os.listdir(scope)))
+                self.assertTrue((scope / 'trial/result.txt').exists())
 
 
 if __name__ == '__main__':

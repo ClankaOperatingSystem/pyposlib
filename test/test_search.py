@@ -58,9 +58,9 @@ class OnDisk(unittest.TestCase):
         with Scope() as scope:
             keeper = remote.Keeper()
             sealed(scope, keeper)
-            disk = search.DiskArchiveSearch(scope.scope / 'archives')
+            disk = search.DiskArchiveSearch(scope.scope / '.clankos/archives')
             client = over(keeper)
-            folded = ai.fold_cids(scope.scope / 'archives')
+            folded = ai.fold_cids(scope.scope / '.clankos/archives')
             asks = [dict(query='alpha'), dict(query='gam'), dict(query='zzz'), dict(query='alpha', limit=2),
                     dict(query='alpha', within=folded['third']), dict(query='alpha', within=folded['first/a.txt']),
                     dict(query='alpha', within=folded['.'], limit=4)]
@@ -79,7 +79,7 @@ class OnDisk(unittest.TestCase):
         with Scope() as scope:
             sealed(scope)
             (scope.scope / 'canon').mkdir()
-            hits = search.DiskArchiveSearch(scope.scope / 'archives').search('alpha')
+            hits = search.DiskArchiveSearch(scope.scope / '.clankos/archives').search('alpha')
             self.assertEqual(5, len(hits))
             for hit in hits:
                 lines = search.lines_of(seal.fetch(hit['ref'], scope.scope / 'canon'))
@@ -92,7 +92,7 @@ class OnDisk(unittest.TestCase):
         line; one that does not parse is request; another mode is mode."""
         with Scope() as scope:
             sealed(scope)
-            disk = search.DiskArchiveSearch(scope.scope / 'archives')
+            disk = search.DiskArchiveSearch(scope.scope / '.clankos/archives')
             self.assertEqual(('literal', 'regex'), disk.modes)
             self.assertEqual(['beta alpha', 'gamma'], [h['passage'] for h in disk.search('^[bg]', mode='regex')])
             self.assertEqual(['alpha'] * 4, [h['passage'] for h in disk.search('^alpha$', mode='regex')])
@@ -104,7 +104,7 @@ class OnDisk(unittest.TestCase):
         hashes them, and each hit names its file by its own CID, there being
         no item."""
         with Scope() as scope:
-            archive = scope.scope / 'archives'
+            archive = scope.scope / '.clankos/archives'
             events = begun(0, 2)
             for number, (name, data) in enumerate(events, 1):
                 write(archive / f'{number}.md', f'old {number}'.encode())
@@ -122,19 +122,19 @@ class OnDisk(unittest.TestCase):
             kept.seal('trial')
             other = kept.dir / 'projects' / 'b'
             write(other / 'note' / 'n.txt', b'a result\nno\nanother result\n')
-            plan = seal.plan(other / 'note', other / 'archives' / 'note')
+            plan = seal.plan(other / 'note', other / '.clankos/archives' / 'note')
             seal.apply(plan, ai.sha(ai.encoded(plan)))
             keeper_for = lambda url: kept.client()  # noqa: E731
-            kept_cids = ai.fold_cids(kept.scope / 'archives')
-            other_cids = ai.fold_cids(other / 'archives')
+            kept_cids = ai.fold_cids(kept.scope / '.clankos/archives')
+            other_cids = ai.fold_cids(other / '.clankos/archives')
             found = search.scope(kept.dir, 'result', keeper_for=keeper_for)
-            self.assertEqual([(kept.scope / 'archives', [(f'ipfs://{kept_cids["trial"]}/result.txt', [1, 1], 'result')]),
-                              (other / 'archives', [(f'ipfs://{other_cids["note"]}/n.txt', [1, 1], 'a result'),
+            self.assertEqual([(kept.scope / '.clankos/archives', [(f'ipfs://{kept_cids["trial"]}/result.txt', [1, 1], 'result')]),
+                              (other / '.clankos/archives', [(f'ipfs://{other_cids["note"]}/n.txt', [1, 1], 'a result'),
                                                     (f'ipfs://{other_cids["note"]}/n.txt', [3, 3], 'another result')])],
                              [(archive, shape(hits)) for archive, hits in found])
             self.assertEqual([1, 1], [len(hits) for _, hits in search.scope(kept.dir, 'result', limit=2,
                                                                            keeper_for=keeper_for)])
-            self.assertEqual([other / 'archives'],
+            self.assertEqual([other / '.clankos/archives'],
                              [archive for archive, _ in search.scope(kept.dir, 'result', within=other_cids['note'],
                                                                      keeper_for=keeper_for)])
             self.assertEqual([], search.scope(kept.dir, 'nothing of the kind', keeper_for=keeper_for))
@@ -155,7 +155,7 @@ class OnDisk(unittest.TestCase):
                         search.scope(kept.dir, 'result', keeper_for=keeper_for, **ask)
                     except ai.Refused as refused:
                         self.assertEqual('absent', refused.kind)
-                        self.assertIn(str(kept.scope / 'archives'), str(refused))
+                        self.assertIn(str(kept.scope / '.clankos/archives'), str(refused))
                         self.assertIn('does not search', str(refused))
                     else:
                         self.fail('not refused')
@@ -166,7 +166,7 @@ class OnDisk(unittest.TestCase):
         options narrow it; a wrong option prints the usage and exits 2."""
         with Scope() as scope:
             sealed(scope)
-            folded = ai.fold_cids(scope.scope / 'archives')
+            folded = ai.fold_cids(scope.scope / '.clankos/archives')
 
             def run(*args):
                 done = subprocess.run([sys.executable, '-B', str(TOOL), 'search', str(scope.scope), *args],

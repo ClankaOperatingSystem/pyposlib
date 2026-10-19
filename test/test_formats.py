@@ -344,8 +344,10 @@ class Kept(unittest.TestCase):
         repair protects its ledger's events and looks for nothing else."""
         with Built(dict(fixtures('ledger'))['report-kept']) as root:
             scope = root.resolve() / 'projects/a'
-            event = ai.history(scope / 'archives')[3][0]
-            self.assertEqual(str(scope / 'archive-integrity/checkpoints'),
+            (scope / '.clankos').mkdir()
+            (scope / 'archive-integrity').rename(scope / '.clankos/archive-integrity')
+            event = ai.history(scope / '.clankos/archives')[3][0]
+            self.assertEqual(str(scope / '.clankos/archive-integrity/checkpoints'),
                              str(ai.checkpoint_root(scope)))
             event.chmod(0o644)
             self.assertEqual(dict(repaired=1, restored=0, unregistered=0), ai.repair(scope))

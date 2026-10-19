@@ -169,17 +169,25 @@ def entries_of(files):
     return dict(sorted((path, entry(file)) for path, file in files.items()))
 
 
+def target(destination):
+    """(archive, rel): where a writer seals destination, an absolute path
+    inside an archive spelled in any place a scope's archive may be. The
+    archive is the one ai.targets gives for that archive's scope, and rel
+    the path within it. Refuses 'destination' for a path in no archive, and
+    as ai.targets refuses."""
+    archive = outermost_archive(destination)
+    if archive is None:
+        raise Refused('destination', f'Destination is not in an archive: {destination}')
+    return ai.targets(ai.archive_scope(archive))['archive'], os.path.relpath(destination, archive)
+
+
 def plan(source, destination, ledger_id=None):
     """The plan to seal source at destination, inside an archive. ledger_id
     names a new ledger; by default it takes the id its scope's entry names,
     else one made at random."""
     source = ai.checked(source).resolve()
-    destination = Path(os.path.abspath(destination))
-    ai.checked(destination.parent)
-    archive = outermost_archive(destination)
-    if archive is None:
-        raise Refused('destination', f'Destination is not in an archive: {destination}')
-    rel = os.path.relpath(destination, archive)
+    archive, rel = target(Path(os.path.abspath(destination)))
+    ai.checked((archive / rel).parent)
     archive = archive.resolve()
     destination = archive / rel
     if outermost_archive(source) is not None:
@@ -228,16 +236,13 @@ def plan(source, destination, ledger_id=None):
 
 
 def stage(data, destination, ledger_id=None):
-    """Stage data, a new record, beside the archive in _seal/, with destination's
-    extension, and plan to seal it. The staged file is named for destination,
-    so staging for it again replaces what was staged before. If planning
-    fails, nothing is left staged."""
-    archive = outermost_archive(Path(os.path.abspath(destination)))
-    if archive is None:
-        raise Refused('destination', f'Destination is not in an archive: {destination}')
-    folder = archive.parent / '_seal'
+    """Stage data, a new record, in _seal/ in the archive's scope, with
+    destination's extension, and plan to seal it. The staged file is named
+    for destination, so staging for it again replaces what was staged
+    before. If planning fails, nothing is left staged."""
+    archive, relative = target(Path(os.path.abspath(destination)))
+    folder = ai.archive_scope(archive) / '_seal'
     folder.mkdir(parents=True, exist_ok=True)
-    relative = os.path.relpath(os.path.abspath(destination), archive)
     name = str(folder / ('new-' + sha(relative.encode())[:16] + Path(destination).suffix))
     with open(name, 'wb') as stream:
         stream.write(data)
@@ -452,7 +457,7 @@ def claims_of(plan, expected):
     claims = dict(tool='pyposlib', **(dict(plan=expected) if expected else {}))
     if commit := tool_commit():
         claims['tool_commit'] = commit
-    scope = Path(plan['archive']).parent
+    scope = ai.archive_scope(plan['archive'])
     root = next((part for part in [scope, *scope.parents] if (part / '.git').exists()), None)
     if root is None:
         return claims
@@ -605,6 +610,8 @@ def apply(plan, expected, keeper=None, claims=None):
         raise Refused('plan', 'Reviewed plan hash mismatch')
     if plan.get('schema') != 2 or plan.get('operation') != 'seal':
         raise Refused('plan', 'Not a seal plan')
+    if ai.targets(ai.archive_scope(plan['archive']))['archive'] != Path(plan['archive']):
+        raise Refused('plan', f"The archive is not where it was planned: {plan['archive']}")
     if plan.get('kept'):
         return apply_kept(plan, expected, keeper, claims)
     if ai.kept(plan['archive']):

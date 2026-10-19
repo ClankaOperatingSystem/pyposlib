@@ -52,7 +52,7 @@ class Scope:
     def __enter__(self):
         self.dir = Path(tempfile.mkdtemp(prefix='pyposlib-remote-')).resolve()
         self.scope = self.dir / 'scope'
-        (self.scope / 'archives').mkdir(parents=True)
+        (self.scope / '.clankos/archives').mkdir(parents=True)
         return self
 
     def __exit__(self, *_):
@@ -66,18 +66,18 @@ class Scope:
             write(self.scope / item / path, data)
         for path in empty:
             (self.scope / item / path).mkdir(parents=True)
-        plan = seal.plan(self.scope / item, self.scope / 'archives' / item, LEDGER_ID)
+        plan = seal.plan(self.scope / item, self.scope / '.clankos/archives' / item, LEDGER_ID)
         event, _ = seal.apply(plan, ai.sha(ai.encoded(plan)))
         return self.sent(event)
 
     def sent(self, event):
         data = event.read_bytes()
         add = json.loads(data).get('add', {})
-        return event.name, data, {entry['cid']: (self.scope / 'archives' / path).read_bytes()
+        return event.name, data, {entry['cid']: (self.scope / '.clankos/archives' / path).read_bytes()
                                   for path, entry in add.items()}
 
     def history(self):
-        return ai.history(self.scope / 'archives')
+        return ai.history(self.scope / '.clankos/archives')
 
 
 def begun(unnamed, named=1, ledger_id=LEDGER_ID, text='old'):
@@ -126,7 +126,7 @@ class Protocol(unittest.TestCase):
             self.assertEqual((LEDGER_ID, head, events, root),
                              tuple(described[k] for k in ('ledger_id', 'head', 'events', 'root')))
             self.assertEqual(dict(head='abc', dirty='false'), keeper.claims[-1])
-            folded = ai.fold_cids(scope.scope / 'archives')
+            folded = ai.fold_cids(scope.scope / '.clankos/archives')
             self.assertEqual(first[1], client.event(1))
             self.assertEqual(b'first', client.read(folded['first/a.txt']))
             self.assertEqual(b'c', client.read(folded['second'], 'sub/c.txt'))
@@ -158,7 +158,7 @@ class Protocol(unittest.TestCase):
             self.assertFalse(client.put(cids[0], blocks[cids[0]]))
             self.assertEqual([], client.held(cids))
             self.assertEqual(1, client.append(name, event, {}, {})['events'])
-            folded = ai.fold_cids(scope.scope / 'archives')
+            folded = ai.fold_cids(scope.scope / '.clankos/archives')
             self.assertEqual(big, client.read(folded['first/big']))
             self.assertEqual(b'first', client.read(folded['first/a.txt']))
 
@@ -259,7 +259,7 @@ class Protocol(unittest.TestCase):
         """Its old events go bare, the conversion event with every file the
         ledger enrols; the keeper then folds to the root the ledger recorded."""
         with Scope() as scope:
-            archive = scope.scope / 'archives'
+            archive = scope.scope / '.clankos/archives'
             for item, files in (('a', {'x.txt': b'x'}), ('b', {'y.txt': b'y'})):
                 for path, data in files.items():
                     write(archive / item / path, data)
@@ -303,7 +303,7 @@ class Protocol(unittest.TestCase):
             keeper = remote.Keeper(blocks=store)
             over(keeper).append(*first, {})
             again = remote.Keeper(LEDGER_ID, keeper.events, store)
-            folded = ai.fold_cids(scope.scope / 'archives')
+            folded = ai.fold_cids(scope.scope / '.clankos/archives')
             self.assertEqual(keeper.describe(), again.describe())
             self.assertEqual(b'b', over(again).read(folded['first'], 'sub/b.txt'))
             store.asked.clear()
@@ -341,7 +341,7 @@ class Protocol(unittest.TestCase):
                 self.assertEqual(1, client.append(name, event, files, {})['events'])
                 self.assertEqual(b'first', client.read(next(iter(files))))
                 self.assertEqual(event, client.event(1))
-                self.assertEqual([dict(ref=f'ipfs://{ai.fold_cids(scope.scope / "archives")["first"]}/a.txt',
+                self.assertEqual([dict(ref=f'ipfs://{ai.fold_cids(scope.scope / ".clankos/archives")["first"]}/a.txt',
                                        range=dict(lines=[1, 1]), passage='first')],
                                  client.search('irs'))
                 self.assertEqual('absent', refusal(lambda: client.event(2)))
@@ -527,7 +527,7 @@ class Poslib(unittest.TestCase):
             served = remote.server(keeper, token='let-me-in')
             threading.Thread(target=served.serve_forever, daemon=True).start()
             request, answer = scope.dir / 'request.json', scope.dir / 'answer.json'
-            folded = ai.fold_cids(scope.scope / 'archives')
+            folded = ai.fold_cids(scope.scope / '.clankos/archives')
             request.write_text(json.dumps(dict(
                 url=f'http://127.0.0.1:{served.server_address[1]}', token='let-me-in', name=name,
                 event=event.decode(), files={k: v.decode() for k, v in files.items()},
@@ -569,7 +569,7 @@ class Search(unittest.TestCase):
                             ('second', {'c.txt': b'alpha'}),
                             ('third', {'x.txt': b'alpha', 'y.txt': b'alpha'})):
             client.append(*scope.seal(item, files), {})
-        return keeper, client, ai.fold_cids(scope.scope / 'archives')
+        return keeper, client, ai.fold_cids(scope.scope / '.clankos/archives')
 
     def assertConfirmed(self, client, hits):
         """The trust invariant: read of each hit's ref at its range gives its passage."""

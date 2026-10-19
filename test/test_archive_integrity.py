@@ -196,8 +196,8 @@ class IntegrityChecks(unittest.TestCase):
         replaced; check, checkpoint and repair; help; the old commands gone."""
         tool = [sys.executable, '-B', str(HOME / 'archive_integrity.py')]
         scope = self.root / 'fresh'
-        (scope / 'archive-integrity').mkdir(parents=True)
-        new = scope / 'archives' / 'new.txt'
+        (scope / '.clankos/archive-integrity').mkdir(parents=True)
+        new = scope / '.clankos/archives' / 'new.txt'
         write_new = [*tool, 'write-new', str(new), '--apply']
         result = subprocess.run(write_new, input=b'New record', capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -210,7 +210,7 @@ class IntegrityChecks(unittest.TestCase):
         self.assertEqual(run('check', str(scope)).returncode, 1)
         self.assertEqual(json.loads(run('repair', str(scope)).stdout), dict(repaired=1, restored=0, unregistered=0))
         checkpointed = json.loads(run('checkpoint', str(scope)).stdout)['checkpointed']
-        self.assertEqual(Path(checkpointed), (scope / 'archive-integrity/checkpoints').resolve())
+        self.assertEqual(Path(checkpointed), (scope / '.clankos/archive-integrity/checkpoints').resolve())
         self.assertIn(b'checkpoint ROOT', run('help').stdout)
         for old in (['preview', str(scope)], ['verify-existing', str(scope)], ['seal', str(new)]):
             self.assertEqual(run(*old).returncode, 2, old)
