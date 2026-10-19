@@ -680,7 +680,8 @@ def anchor_base(root):
 
 
 def anchor_home(root):
-    """Where new checkpoints for root go: beside it, else the legacy folder."""
+    """Where the legacy schema 1 writer puts new checkpoints for root: beside
+    it, else the legacy folder."""
     base = anchor_base(root)
     return base / INTEGRITY / 'checkpoints' if (base / INTEGRITY).is_dir() else base / ANCHORS
 
@@ -749,15 +750,15 @@ def check_anchors(root, archives):
                          ', '.join(sorted(required - present)))
 
 
-def checkpoint_heads(root):
-    """Retain observed ledger heads outside archives to detect a vanished tree."""
+def checkpoint_heads(root, home=None):
+    """Retain observed ledger heads outside archives to detect a vanished tree:
+    in home, by default where the legacy writer puts them."""
     archives = roots(root)
     check_anchors(root, archives)
     heads = sorted({history(a)[1] for a in archives if history(a)[1]})
     if heads:
-        data = encoded(dict(schema=1, heads=heads,
-                            coverage='archive' if Path(root).name == 'archives' else 'tree'))
-        path = anchor_home(root) / (sha(data) + '.json')
+        data = encoded(dict(schema=1, heads=heads, coverage=coverage(checked(root).resolve())))
+        path = (home or anchor_home(root)) / (sha(data) + '.json')
         if not path.exists():
             new_file(path, data)
         elif path.read_bytes() != data:
@@ -1140,12 +1141,15 @@ Exit 0 done or clean, 1 findings, 2 refused.
 
 
 def checkpoint_root(root):
-    """Record the ledger heads under root once the check is clean; return where."""
+    """Record the ledger heads under root once the check is clean; return where.
+    It is written where targets says a writer at root's scope writes, which
+    refuses before anything is checked or written."""
+    home = targets(anchor_base(root))['checkpoints']
     checks = report(root)
     if any(r['changed'] or r['missing'] or r['new'] or r['writable'] for r in checks):
         raise Refused('unclean', f'Enrol new records and restore permissions before checkpointing: {root}')
-    checkpoint_heads(root)
-    return anchor_home(root)
+    checkpoint_heads(root, home)
+    return home
 
 
 def main(args=None):

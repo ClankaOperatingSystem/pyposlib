@@ -155,9 +155,9 @@ class DifferentialSeal(unittest.TestCase):
             write(root / 'item/result.txt', b'result')
             if problem == 'read-bits':
                 (root / 'item/result.txt').chmod(0o600)
-            plan = seal.plan(root / 'item', root / 'archives/item')
+            plan = seal.plan(root / 'item', root / '.clankos/archives/item')
             seal.apply(plan, ai.sha(ai.encoded(plan)))
-            item = root / 'archives/item'
+            item = root / '.clankos/archives/item'
             (item / 'a').rmdir()
             (item / 'z/leaf').rmdir()
             (item / 'z').rmdir()
@@ -187,7 +187,7 @@ class DifferentialSeal(unittest.TestCase):
         tasks, ours, pending = [], [], []
         for i in range(20):
             base = self.work / f'seal-{i}'
-            archive = base / 'scope' / 'archives'
+            archive = base / 'scope' / '.clankos/archives'
             archive.mkdir(parents=True)
             tree(rng, archive)
             if rng.random() < 0.5:
@@ -202,7 +202,7 @@ class DifferentialSeal(unittest.TestCase):
                 write(item / 'README.org', b'#+TITLE: Item\n#+COLLECTION: t\n')
             theirs = self.work / f'seal-{i}-poslib'
             shutil.copytree(base, theirs, symlinks=True)
-            task = dict(source='scope/item', destination=f'scope/archives/sealed-{i}',
+            task = dict(source='scope/item', destination=f'scope/.clankos/archives/sealed-{i}',
                         ledger_id='0f1e2d3c-4b5a-4968-8778-a6b5c4d3e2f1')
             tasks.append(dict(kind='seal', path=str(theirs), **task))
             root = base.resolve()
@@ -246,7 +246,7 @@ class DifferentialSeal(unittest.TestCase):
         seals = []
         for i in range(10):
             base = self.work / f'link-{i}'
-            archive = base / 'scope' / 'archives'
+            archive = base / 'scope' / '.clankos/archives'
             archive.mkdir(parents=True)
             tree(rng, archive)
             if rng.random() < 0.5:
@@ -258,12 +258,12 @@ class DifferentialSeal(unittest.TestCase):
             if rng.random() < 0.5:
                 write(item / 'README.org', b'#+TITLE: Item\n#+COLLECTION: t\n')
             seals.append(dict(kind='seal', path=str(base), source='scope/item',
-                              destination='scope/archives/sealed',
+                              destination='scope/.clankos/archives/sealed',
                               ledger_id='0f1e2d3c-4b5a-4968-8778-a6b5c4d3e2f1'))
         poslib(seals)
         paths = [path for task in seals
                  for scope in [Path(task['path']) / 'scope']
-                 for path in [*sorted(scope.rglob('*')), scope / 'archives' / 'absent' / 'file']]
+                 for path in [*sorted(scope.rglob('*')), scope / '.clankos/archives' / 'absent' / 'file']]
         ours = []
         for path in paths:
             try:
@@ -283,7 +283,7 @@ class DifferentialSeal(unittest.TestCase):
         seals = []
         for i in range(10):
             base = self.work / f'fetch-{i}'
-            archive = base / 'scope' / 'archives'
+            archive = base / 'scope' / '.clankos/archives'
             archive.mkdir(parents=True)
             tree(rng, archive)
             if rng.random() < 0.5:
@@ -294,13 +294,13 @@ class DifferentialSeal(unittest.TestCase):
             write(item / 'bytes.bin', bytes(rng.randrange(256) for _ in range(300)))
             tree(rng, item)
             seals.append(dict(kind='seal', path=str(base), source='scope/item',
-                              destination='scope/archives/sealed',
+                              destination='scope/.clankos/archives/sealed',
                               ledger_id='0f1e2d3c-4b5a-4968-8778-a6b5c4d3e2f1'))
         poslib(seals)
         tasks = []
         for task in seals:
             scope = Path(task['path']) / 'scope'
-            for path in sorted((scope / 'archives' / 'sealed').rglob('*')):
+            for path in sorted((scope / '.clankos/archives' / 'sealed').rglob('*')):
                 link = seal.link(path)
                 tasks += [dict(kind='fetch', uri=link, directory=str(scope)),
                           dict(kind='fetch', uri=link + '::a search', directory=str(scope))]
