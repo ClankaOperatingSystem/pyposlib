@@ -353,7 +353,13 @@ def refuse_at(kind, scope, paths, message):
 
 def probe(scope, path, kind):
     """path if it is a directory, None if nothing is there. Refuses 'link'
-    for a symbolic link, and kind for anything else there."""
+    for a symbolic link, and kind for anything else there. With kind None, a
+    file or a symbolic link to anything but a directory is not looked at, and
+    is taken for nothing there: the name archives or archive-integrity on a
+    file says nothing of an archive, as a link to a command of that name does
+    not."""
+    if kind is None and not path.is_dir():
+        return None
     if path.is_symlink():
         refuse_at('link', scope, [path], 'Symbolic link')
     if path.is_dir():
@@ -403,15 +409,16 @@ def locations(scope):
     one existing archive, ledger and checkpoints directory, or None, and the
     components, the archives, archive-integrity and legacy checkpoint
     directories at the scope, sorted. Each configuration directory and the
-    scope itself are probed; nothing is written. Refuses 'archive-location',
+    scope itself are probed; a file or a link to a file named archives or
+    archive-integrity is passed over; nothing is written. Refuses 'archive-location',
     'ledger-location' or 'checkpoint-location' where two of one are found,
     and a symbolic link or a file where a directory would be."""
     scope = Path(os.path.abspath(scope))
     holders = [p for p in (scope / name for name in CONFIG_DIRECTORIES) if probe(scope, p, 'config')]
     archives, ledgers, checkpoints, components = [], [], [], []
     for holder in [*holders, scope]:
-        archive = probe(scope, holder / 'archives', 'root')
-        integrity = probe(scope, holder / INTEGRITY, 'ledger')
+        archive = probe(scope, holder / 'archives', None)
+        integrity = probe(scope, holder / INTEGRITY, None)
         if archive:
             archives.append(archive)
             components.append(archive)
