@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Test against the poslib that has the matching protocol and fixtures.
-      POSLIB_REF: d1c3083f99c7438423d6752169c986d825322531
+      POSLIB_REF: f2b05df1c923403d3696187a3a88668f251c3460
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
