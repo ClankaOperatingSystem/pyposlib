@@ -71,7 +71,7 @@ def run(fixture, root):
                 raise AssertionError('The recording was not played out, or the item was left')
         else:
             event, _ = seal.apply(plan, ai.sha(ai.encoded(plan)))
-        scope = Path(plan['archive']).parent
+        scope = ai.archive_scope(plan['archive'])
         return dict(plan=relative_plan(plan, root),
                     event=dict(name=event.name, encoded=event.read_bytes().decode()),
                     # The recording is of the seal: the report after it asks no keeper.
