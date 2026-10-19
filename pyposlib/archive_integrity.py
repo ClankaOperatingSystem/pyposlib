@@ -546,7 +546,11 @@ ORDINARY = {'schema', 'previous', 'add', 'ledger_id', 'root', 'collections', 'it
 
 def history(archive):
     """entries, head, events, files, recorded root, collections, items, empty."""
-    folder = ledger_folder(archive)
+    return folder_history(ledger_folder(archive))
+
+
+def folder_history(folder):
+    """The ledger in folder, as history gives it."""
     if not folder.exists() and not folder.is_symlink():
         return {}, None, 0, [], None, [], [], []
     if folder.is_symlink() or not folder.is_dir():
@@ -711,20 +715,61 @@ def checkpoint_files(root, archives):
     return [file for folder in sorted(folders) for file in sorted(folder.iterdir())]
 
 
+def checkpoint_value(path):
+    """The checkpoint in path, refused 'checkpoint' unless it is named by the
+    SHA-256 of its bytes, and has schema 1, a coverage of archive or tree,
+    and heads that are hashes or block CIDs."""
+    regular(path)
+    data = path.read_bytes()
+    if path.name != sha(data) + '.json':
+        raise Refused('checkpoint', f'Checkpoint hash failure: {path}')
+    value = json.loads(data)
+    if (set(value) != {'schema', 'heads', 'coverage'} or value['schema'] != 1
+            or value['coverage'] not in ('archive', 'tree')
+            or not isinstance(value['heads'], list)
+            or any(not isinstance(h, str) or not (re.fullmatch('[0-9a-f]{64}', h) or is_event_cid(h))
+                   for h in value['heads'])):
+        raise Refused('checkpoint', 'Invalid checkpoint')
+    return value
+
+
+def is_ledger_file(path):
+    """Whether path is in a ledger folder, legacy or current."""
+    return path.parent.name == META or (path.parent.name == 'ledger' and path.parent.parent.name == INTEGRITY)
+
+
+def is_checkpoint_file(path):
+    """Whether path is in a checkpoint folder, legacy or current."""
+    return path.parent.name == ANCHORS or (
+        path.parent.name == 'checkpoints' and path.parent.parent.name == INTEGRITY)
+
+
+def check_within(directory):
+    """Refuses unless the ledgers and checkpoints within directory are sound:
+    what the check of an archive holding directory reads of them, and no
+    more. Each ledger within it, legacy or current, reads as a chain of
+    events; and each head a checkpoint within it names is an event of one of
+    those ledgers, by its hash or its CID as a block, else 'anchor'.
+    directory need hold no archive, and no keeper is asked."""
+    files = sorted(p for p in Path(directory).rglob('*.json') if not p.is_dir() or p.is_symlink())
+    events = [p for p in files if is_ledger_file(p)]
+    present = set()
+    for path in events:
+        regular(path)
+        data = path.read_bytes()
+        present.update((sha(data), event_cid(data)))
+    for folder in sorted({p.parent for p in events}):
+        folder_history(folder)
+    required = {head for p in files if is_checkpoint_file(p) for head in checkpoint_value(p)['heads']}
+    if required - present:
+        raise Refused('anchor', f'Checkpointed events missing within {directory}: '
+                      + ', '.join(sorted(required - present)))
+
+
 def check_anchors(root, archives):
     required = set()
     for path in checkpoint_files(root, archives):
-        regular(path)
-        data = path.read_bytes()
-        if path.name != sha(data) + '.json':
-            raise Refused('checkpoint', f'Checkpoint hash failure: {path}')
-        value = json.loads(data)
-        if (set(value) != {'schema', 'heads', 'coverage'} or value['schema'] != 1
-                or value['coverage'] not in ('archive', 'tree')
-                or not isinstance(value['heads'], list)
-                or any(not isinstance(h, str) or not (re.fullmatch('[0-9a-f]{64}', h) or is_event_cid(h))
-                       for h in value['heads'])):
-            raise Refused('checkpoint', 'Invalid checkpoint')
+        value = checkpoint_value(path)
         if Path(root).name != 'archives' or value['coverage'] == 'archive':
             required.update(value['heads'])
     present = set()

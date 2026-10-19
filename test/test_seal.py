@@ -832,6 +832,52 @@ class Retirement(unittest.TestCase):
             self.assertEqual('anchor', refused.exception.kind)
             self.assertFalse((garden / '_seal').exists())
 
+    def test_a_scope_whose_keeper_keeps_its_archive_retires(self):
+        """A scope whose archive a keeper keeps retires as its ledger and
+        checkpoints: its archive-integrity/, hidden in .clankos, is at the top
+        of the item, there being no archives/ anywhere; no keeper is asked;
+        and the parent's check after the seal, asking no keeper, has no
+        finding."""
+        def nobody(*_):
+            raise AssertionError('A keeper was asked')
+        with Built(dict(fixtures('ledger'))['report-kept']) as built, \
+                unittest.mock.patch.object(ai, 'keeper_of', nobody):
+            garden = built.resolve()
+            scope = garden / 'projects/a'
+            (scope / '.clankos').mkdir()
+            (scope / 'archive-integrity').rename(scope / '.clankos/archive-integrity')
+            # The garden's own checkpoint names a head of a ledger the kept
+            # archive enrols, which its keeper holds and the retired item does not.
+            seal.remove_tree(garden / 'archive-integrity')
+            ledger = files_of(scope / '.clankos')
+            plan = seal.plan(scope, garden / 'archives/a')
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            item = garden / '.pos/archives/a'
+            self.assertEqual(ledger, files_of(item))
+            self.assertFalse((item / 'archives').exists())
+            self.assertFalse(scope.exists())
+            self.assertFalse(any(ai.findings(r) for r in ai.report(garden, ask=False)))
+
+    def test_scopes_retired_in_earlier_layouts_are_read_as_sealed(self):
+        """Inside a parent's archive, a scope with its ledger beside its
+        archive, one with the legacy ledger inside it, and one with legacy
+        checkpoints are reported clean."""
+        layouts = {'sibling': lambda path: path,
+                   'internal': lambda path: path.replace('archive-integrity/ledger/', 'archives/.archive-integrity/'),
+                   'anchors': lambda path: path.replace('archive-integrity/checkpoints/', '.archive-integrity-anchors/')}
+        with Garden() as root:
+            archive = root / '.clankos/archives'
+            for name, place in layouts.items():
+                for entry in dict(fixtures('layout'))['T04-read']['tree']:
+                    path = place(entry['path'])
+                    if not (name == 'internal' and path.startswith('archive-integrity/checkpoints/')):
+                        write(archive / name / path, entry['text'].encode(), 0o444)
+            event = ai.encoded(dict(schema=1, previous=None, add=ai.inventory(archive),
+                                    ledger_id='0f1e2d3c-4b5a-4968-8778-a6b5c4d3e2f1'))
+            ai.new_file(root / f'.clankos/archive-integrity/ledger/00000001-{ai.sha(event)}.json', event)
+            ai.checkpoint_root(root)
+            self.assertFalse(any(ai.findings(r) for r in ai.report(root, ask=False)))
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

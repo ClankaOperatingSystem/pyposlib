@@ -311,8 +311,8 @@ def plan_retirement(directory, destination, ledger_id=None):
     directory's archives/ and archive-integrity/ are at the top, with their
     names, bytes and modes, and are not in the configuration directory.
     Whatever else the export holds is sealed as any item is, a hidden file
-    refused. The export is checked, its nested checkpoints with it, asking no
-    keeper, and is then planned as the item; the plan also names directory,
+    refused. Its ledgers and checkpoints are checked by ai.check_within,
+    asking no keeper, and it is then planned as the item; the plan also names directory,
     as retires, and the SHA-256 of its inventory, so that applying it refuses
     a directory changed since, and removes it once sealed."""
     selected = ai.targets(directory)['selected']
@@ -330,7 +330,7 @@ def plan_retirement(directory, destination, ledger_id=None):
             if (hidden / name).exists():
                 (hidden / name).rename(export / name)
         drop_empty(hidden)
-        ai.report(export, ask=False)
+        ai.check_within(export)
         return dict(plan_item(export, destination, ledger_id), retires=str(directory), retires_sha256=digest)
     except Exception:
         remove_tree(base)
