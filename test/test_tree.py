@@ -382,14 +382,17 @@ class Trees(unittest.TestCase):
         self.assertNotIn('/stray/archives/', rules)
 
     def test_archive_patterns_are_literal_and_future_scopes_are_covered(self):
+        """A declared scope not yet made is excluded at the archive in the
+        directory a writer there would select, .clankos; its pattern is
+        literal."""
         root = repository(self.path('root'), {
             '.pos/config.yml': 'pos: 2\nprojects: projects/\narchives:\n'
                               '  - scope: "jobs/[one]* x"\n    kept: uncommitted\n'})
         self.settle(root)
-        for name in ('jobs/[one]* x/archives/evidence', 'jobs/one x/archives/evidence'):
+        for name in ('jobs/[one]* x/.clankos/archives/evidence', 'jobs/one x/.clankos/archives/evidence'):
             write(root, name, 'evidence\n')
-        self.assertEqual(subprocess.run(['git', 'check-ignore', '-q', 'jobs/[one]* x/archives/evidence'], cwd=root).returncode, 0)
-        self.assertEqual(subprocess.run(['git', 'check-ignore', '-q', 'jobs/one x/archives/evidence'], cwd=root).returncode, 1)
+        self.assertEqual(subprocess.run(['git', 'check-ignore', '-q', 'jobs/[one]* x/.clankos/archives/evidence'], cwd=root).returncode, 0)
+        self.assertEqual(subprocess.run(['git', 'check-ignore', '-q', 'jobs/one x/.clankos/archives/evidence'], cwd=root).returncode, 1)
 
     def test_mounted_archive_policy_comes_from_the_committed_configuration(self):
         origin = repository(self.path('origin'), {'.pos/config.yml': 'pos: 2\nprojects: projects/\n'})
@@ -513,13 +516,31 @@ class Trees(unittest.TestCase):
 
     def test_archive_scopes_are_not_looked_for_in_excluded_directories(self):
         """An archives directory beneath an excluded one is no scope of the
-        node's; one that is not excluded is, as before."""
+        node's; one that is not excluded is, as before. The node's own
+        archive, which does not exist yet, is excluded in .clanka, where its
+        configuration is and where a writer would make it."""
         root = repository(self.path('root'), {
             '.clanka/config.yaml': 'pos: 2\nprojects: projects/\nexclude:\n  - old\n'})
         write(root, 'old/archives/evidence', 'old\n')
         write(root, 'kept/archives/evidence', 'kept\n')
         action = next(a for a in self.plan(root)['actions'] if a['do'] == 'archive-excludes')
-        self.assertEqual(action['paths'], ['archives', 'kept/archives'])
+        self.assertEqual(action['paths'], ['.clanka/archives', 'kept/archives'])
+
+    def test_an_archive_in_a_configuration_directory_is_excluded_there(self):
+        """An uncommitted archive in a scope's configuration directory is
+        excluded there. The scope is found by that archive, as by one beside
+        it; Git then ignores what is in the archive, and an archive beside its
+        scope is still excluded where it is."""
+        root = repository(self.path('root'), {'.pos/config.yaml': 'pos: 2\nprojects: projects/\n'})
+        write(root, '.pos/archives/evidence', 'root\n')
+        write(root, 'notes/.clankos/archives/evidence', 'notes\n')
+        write(root, 'older/archives/evidence', 'older\n')
+        action = next(a for a in self.plan(root)['actions'] if a['do'] == 'archive-excludes')
+        self.assertEqual(action['paths'], ['.pos/archives', 'notes/.clankos/archives', 'older/archives'])
+        tree.ignore_archives(root)
+        for name in ('.pos/archives/evidence', 'notes/.clankos/archives/evidence', 'older/archives/evidence'):
+            with self.subTest(name):
+                self.assertEqual(subprocess.run(['git', 'check-ignore', '-q', name], cwd=root).returncode, 0)
 
     # Names, kinds and directories
 

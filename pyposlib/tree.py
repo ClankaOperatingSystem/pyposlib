@@ -60,7 +60,7 @@ import sys
 
 import yaml
 
-from .archive_integrity import CONFIG_PATHS, Refused, config_files, encoded
+from .archive_integrity import CONFIG_DIRECTORIES, CONFIG_PATHS, Refused, archive_paths, config_files, encoded, select
 
 VERSION = 2
 METHODOLOGY_FILE = 'methodology.yaml'
@@ -868,13 +868,17 @@ class _Plan:
     def archives(self, repo, base, config):
         """Collect this node's uncommitted archives, stopping at child boundaries.
         A directory the node's exclusions name is not looked into, though
-        one named archives is a scope wherever it lies."""
+        one named archives is a scope wherever it lies, and so is a
+        directory whose configuration directory holds archives."""
         policies = {entry['scope']: entry['kept'] for entry in config['archives']}
         boundaries = [entry['path'] for entry in config['children'] + config['worktrees']]
         excluded = exclusions(config)
         scopes = {'.', *policies}
 
         def walk(directory, scope):
+            if any(os.path.isdir(archive) and not os.path.islink(archive)
+                   for archive in (os.path.join(directory, name, 'archives') for name in CONFIG_DIRECTORIES)):
+                scopes.add(scope)
             for name in sorted(os.listdir(directory)):
                 full = os.path.join(directory, name)
                 relative = name if scope == '.' else scope + '/' + name
@@ -898,14 +902,31 @@ class _Plan:
                 at = None
             if at is not None:
                 continue  # A nearer node owns this scope, even if undeclared.
-            path = os.path.normpath(os.path.join(base, scope, 'archives'))
-            relative = os.path.relpath(path, repo)
-            # Explicit declarations cannot lead through symlinks either.
-            if _through_link(repo, relative):
-                self.find('path-taken', self.rel(path), 'a symbolic link')
-                self.archive_refused.add(repo)
-            elif policies.get(scope, 'uncommitted') == 'uncommitted':
-                self.archive_paths.setdefault(repo, set()).add(relative)
+            for path in self.scope_archives(repo, os.path.normpath(os.path.join(base, scope))):
+                relative = os.path.relpath(path, repo)
+                # Explicit declarations cannot lead through symlinks either.
+                if _through_link(repo, relative):
+                    self.find('path-taken', self.rel(path), 'a symbolic link')
+                    self.archive_refused.add(repo)
+                elif policies.get(scope, 'uncommitted') == 'uncommitted':
+                    self.archive_paths.setdefault(repo, set()).add(relative)
+
+    def scope_archives(self, repo, scope):
+        """The paths of the archive of scope, a directory, to exclude: each
+        archive there is, beside its configuration directories or in one;
+        with none, the archive in the directory select selects, which need
+        not exist yet. A selection refused is found config-refused, and
+        repo is marked refused."""
+        found = [path for path in (os.path.join(scope, rel) for rel in archive_paths())
+                 if os.path.isdir(path) or os.path.islink(path)]
+        if found:
+            return found
+        try:
+            return [os.path.join(scope, select(scope), 'archives')]
+        except Refused as refused:
+            self.find('config-refused', self.rel(scope), f'{refused.kind}: {refused}')
+            self.archive_refused.add(repo)
+            return []
 
     def archive_excludes(self, repo):
         if repo in self.archive_refused:
