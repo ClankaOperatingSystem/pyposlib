@@ -270,8 +270,7 @@ def retiring(directory):
     """Whether directory is a scope with an archive or bookkeeping hidden:
     in one of its configuration directories."""
     return directory.is_dir() and any(
-        (directory / name / inner).exists() or (directory / name / inner).is_symlink()
-        for name in ai.CONFIG_DIRECTORIES for inner in ('archives', ai.INTEGRITY))
+        (directory / name / inner).is_dir() for name in ai.CONFIG_DIRECTORIES for inner in ('archives', ai.INTEGRITY))
 
 
 def remove_tree(path):

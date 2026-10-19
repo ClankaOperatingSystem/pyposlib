@@ -918,7 +918,7 @@ class _Plan:
         not exist yet. A selection refused is found config-refused, and
         repo is marked refused."""
         found = [path for path in (os.path.join(scope, rel) for rel in archive_paths())
-                 if os.path.isdir(path) or os.path.islink(path)]
+                 if os.path.isdir(path)]
         if found:
             return found
         try:
