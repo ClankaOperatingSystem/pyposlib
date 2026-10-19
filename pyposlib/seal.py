@@ -184,7 +184,17 @@ def target(destination):
 def plan(source, destination, ledger_id=None):
     """The plan to seal source at destination, inside an archive. ledger_id
     names a new ledger; by default it takes the id its scope's entry names,
-    else one made at random."""
+    else one made at random. A source that is a scope with its archive or
+    bookkeeping in a configuration directory is retired from an export, as
+    plan_retirement plans it."""
+    directory = ai.checked(source).resolve()
+    if retiring(directory):
+        return plan_retirement(directory, destination, ledger_id)
+    return plan_item(source, destination, ledger_id)
+
+
+def plan_item(source, destination, ledger_id=None):
+    """The plan to seal source at destination, as plan gives it."""
     source = ai.checked(source).resolve()
     archive, rel = target(Path(os.path.abspath(destination)))
     ai.checked((archive / rel).parent)
@@ -254,6 +264,95 @@ def stage(data, destination, ledger_id=None):
         if not any(folder.iterdir()):
             folder.rmdir()
         raise
+
+
+def retiring(directory):
+    """Whether directory is a scope with an archive or bookkeeping hidden:
+    in one of its configuration directories."""
+    return directory.is_dir() and any(
+        (directory / name / inner).exists() or (directory / name / inner).is_symlink()
+        for name in ai.CONFIG_DIRECTORIES for inner in ('archives', ai.INTEGRITY))
+
+
+def remove_tree(path):
+    """Remove path and everything beneath it, read-only files included."""
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink() or not path.is_dir():
+        path.unlink()
+        return
+    for here, dirs, files in os.walk(path):
+        for name in [*dirs, *files]:
+            if not (Path(here) / name).is_symlink():
+                (Path(here) / name).chmod((Path(here) / name).lstat().st_mode & 0o7777 | 0o200)
+    path.chmod(path.stat().st_mode & 0o7777 | 0o200)
+    shutil.rmtree(path)
+
+
+def drop_empty(*directories):
+    """Remove each of directories, in order, that is an empty directory."""
+    for directory in directories:
+        if directory.is_dir() and not directory.is_symlink() and not os.listdir(directory):
+            directory.rmdir()
+
+
+def inventory_sha(directory):
+    """The SHA-256 of the inventory of directory, hidden files included."""
+    return sha(encoded(ai.inventory(directory)))
+
+
+def plan_retirement(directory, destination, ledger_id=None):
+    """The plan to retire the scope directory into the archive at destination.
+
+    directory keeps its archive or bookkeeping in its selected configuration
+    directory, which ai.targets must find with nothing elsewhere, else it
+    refuses, an archive or archive-integrity/ beside directory included. An
+    export of directory is staged in _seal/ in the archive's scope, where that
+    directory's archives/ and archive-integrity/ are at the top, with their
+    names, bytes and modes, and are not in the configuration directory.
+    Whatever else the export holds is sealed as any item is, a hidden file
+    refused. The export is checked, its nested checkpoints with it, asking no
+    keeper, and is then planned as the item; the plan also names directory,
+    as retires, and the SHA-256 of its inventory, so that applying it refuses
+    a directory changed since, and removes it once sealed."""
+    selected = ai.targets(directory)['selected']
+    archive, rel = target(Path(os.path.abspath(destination)))
+    stage = ai.archive_scope(archive) / '_seal'
+    base = stage / ('export-' + sha(rel.encode())[:16])
+    export = base / directory.name
+    hidden = export / selected
+    digest = inventory_sha(directory)
+    remove_tree(base)
+    try:
+        base.mkdir(parents=True)
+        shutil.copytree(directory, export, symlinks=True)
+        for name in ('archives', ai.INTEGRITY):
+            if (hidden / name).exists():
+                (hidden / name).rename(export / name)
+        drop_empty(hidden)
+        ai.report(export, ask=False)
+        return dict(plan_item(export, destination, ledger_id), retires=str(directory), retires_sha256=digest)
+    except Exception:
+        remove_tree(base)
+        drop_empty(stage)
+        raise
+
+
+def check_retired(plan):
+    """Refuses 'plan' if the scope plan retires has changed since it was
+    planned. A scope no longer there has been removed by an earlier
+    application."""
+    retires = plan.get('retires')
+    if retires and os.path.exists(retires) and inventory_sha(Path(retires)) != plan['retires_sha256']:
+        raise Refused('plan', f'The retired scope changed since review: {retires}')
+
+
+def finish_retirement(plan):
+    """Remove the scope plan retires, and its export's staging, once it is sealed."""
+    if plan.get('retires'):
+        remove_tree(Path(plan['retires']))
+        base = Path(plan['source']).parent
+        drop_empty(base, base.parent)
 
 
 def protect(path):
@@ -612,10 +711,16 @@ def apply(plan, expected, keeper=None, claims=None):
         raise Refused('plan', 'Not a seal plan')
     if ai.targets(ai.archive_scope(plan['archive']))['archive'] != Path(plan['archive']):
         raise Refused('plan', f"The archive is not where it was planned: {plan['archive']}")
-    if plan.get('kept'):
-        return apply_kept(plan, expected, keeper, claims)
-    if ai.kept(plan['archive']):
+    if not plan.get('kept') and ai.kept(plan['archive']):
         raise Refused('plan', f"The archive is not kept as planned: {plan['archive']}")
+    check_retired(plan)
+    done = apply_kept(plan, expected, keeper, claims) if plan.get('kept') else apply_on_disk(plan)
+    finish_retirement(plan)
+    return done
+
+
+def apply_on_disk(plan):
+    """Apply plan, already checked, to an archive on disk."""
     source, destination = Path(plan['source']), Path(plan['destination'])
     archive = Path(plan['archive'])
     rel = os.path.relpath(destination, archive)
