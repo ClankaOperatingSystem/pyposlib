@@ -712,5 +712,126 @@ class WhereAWriterWrites(unittest.TestCase):
                 self.assertTrue((scope / 'trial/result.txt').exists())
 
 
+
+def files_of(directory):
+    """Each file beneath directory by its path, with its SHA-256 and mode."""
+    return sorted((p.relative_to(directory).as_posix(), ai.sha(p.read_bytes()), p.stat().st_mode & 0o7777)
+                  for p in directory.rglob('*') if p.is_file())
+
+
+def retiring_child(garden, selected=None):
+    """garden's scope trial, with an archive and bookkeeping in selected, a
+    bare configuration directory made first, by default none, so that
+    .clankos is selected."""
+    trial = garden / 'trial'
+    if selected:
+        (trial / selected).mkdir(parents=True)
+    write(trial / 'item/result.txt', b'result')
+    write(trial / 'notes.txt', b'Notes\n')
+    plan = seal.plan(trial / 'item', trial / 'archives/item')
+    seal.apply(plan, ai.sha(ai.encoded(plan)))
+    ai.checkpoint_root(trial)
+    return trial
+
+
+class Garden:
+    """A temporary garden directory, resolved."""
+
+    def __enter__(self):
+        self.dir = Path(tempfile.mkdtemp(prefix='pyposlib-retire-')).resolve()
+        return self.dir
+
+    def __exit__(self, *_):
+        writable(self.dir)
+        shutil.rmtree(self.dir)
+
+
+class Retirement(unittest.TestCase):
+    def test_a_retired_scope_s_hidden_archive_is_sealed_visible(self):
+        """Retiring a scope seals its hidden archive and bookkeeping at the
+        top of the item: for each configuration directory, the sealed item
+        holds archives/ and archive-integrity/ with their bytes and modes, and
+        no configuration directory; the child archive's CID is unchanged; the
+        parent's check, which reads the nested ledger, has no finding; the
+        live scope and the staged export are gone."""
+        for selected in ('.clankos', '.clanka', '.pos'):
+            with self.subTest(selected), Garden() as garden:
+                trial = retiring_child(garden, selected)
+                hidden = trial / selected
+                child_cid = cid.cid_tree(hidden / 'archives')['.']
+                archived = files_of(hidden)
+                plan = seal.plan(trial, garden / 'archives/trial')
+                self.assertEqual(str(trial), plan['retires'])
+                self.assertTrue(trial.is_dir())
+                seal.apply(plan, ai.sha(ai.encoded(plan)))
+                item = garden / '.clankos/archives/trial'
+                self.assertFalse((item / selected).exists())
+                self.assertEqual(archived, [f for f in files_of(item) if f[0] != 'notes.txt'])
+                self.assertEqual(child_cid, cid.cid_tree(item / 'archives')['.'])
+                self.assertEqual(b'Notes\n', (item / 'notes.txt').read_bytes())
+                self.assertFalse(any(ai.findings(r) for r in ai.report(garden, ask=False)))
+                self.assertFalse(trial.exists())
+                self.assertFalse((garden / '_seal').exists())
+
+    def test_retirement_refuses_bookkeeping_in_two_places(self):
+        """A scope with its archive hidden and an archive-integrity/ beside it
+        is refused: neither copy changes, and nothing is staged."""
+        with Garden() as garden:
+            trial = retiring_child(garden)
+            write(trial / 'archive-integrity/README', b'x\n')
+            before = files_of(garden)
+            with self.assertRaises(ai.Refused) as refused:
+                seal.plan(trial, garden / 'archives/trial')
+            self.assertEqual('relocation-required', refused.exception.kind)
+            self.assertEqual(before, files_of(garden))
+
+    def test_retirement_refuses_other_hidden_files(self):
+        """Other files in the configuration directory are refused as hidden,
+        and the staged export is removed."""
+        with Garden() as garden:
+            trial = retiring_child(garden)
+            write(trial / '.clankos/people.txt', b'People\n')
+            before = files_of(garden)
+            with self.assertRaises(ai.Refused) as refused:
+                seal.plan(trial, garden / 'archives/trial')
+            self.assertEqual('hidden', refused.exception.kind)
+            self.assertEqual(before, files_of(garden))
+
+    def test_a_retirement_planned_leaves_the_scope_until_applied(self):
+        """Planning a retirement stages an export and changes nothing in the
+        scope. Planning again replaces the export; a scope changed after
+        review refuses the plan, sealing nothing; the plan made afresh
+        applies."""
+        with Garden() as garden:
+            trial = retiring_child(garden)
+            before = files_of(trial)
+            destination = garden / 'archives/trial'
+            seal.plan(trial, destination)
+            plan = seal.plan(trial, destination)
+            self.assertEqual(before, files_of(trial))
+            self.assertEqual(1, len([n for n in os.listdir(garden / '_seal') if n.startswith('export-')]))
+            write(trial / 'notes.txt', b'Changed\n')
+            with self.assertRaises(ai.Refused) as refused:
+                seal.apply(plan, ai.sha(ai.encoded(plan)))
+            self.assertEqual('plan', refused.exception.kind)
+            self.assertTrue(trial.exists())
+            self.assertFalse((garden / '.clankos/archives/trial').exists())
+            plan = seal.plan(trial, destination)
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            self.assertFalse(trial.exists())
+            self.assertEqual(b'Changed\n', (garden / '.clankos/archives/trial/notes.txt').read_bytes())
+
+    def test_a_retirement_export_s_checkpoints_are_checked(self):
+        """The export's checkpoints must name the ledger it holds, else it is
+        refused before anything is planned, and nothing is left staged."""
+        with Garden() as garden:
+            trial = retiring_child(garden)
+            seal.remove_tree(trial / '.clankos/archive-integrity/ledger')
+            with self.assertRaises(ai.Refused) as refused:
+                seal.plan(trial, garden / 'archives/trial')
+            self.assertEqual('anchor', refused.exception.kind)
+            self.assertFalse((garden / '_seal').exists())
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
