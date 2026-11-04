@@ -177,6 +177,21 @@ class Sealing(unittest.TestCase):
             self.assertEqual(cid.cid_tree(archive), ai.fold_cids(archive))
             self.assertEqual(root, ai.fold_cids(archive)['.'])
 
+    def test_a_ledger_event_leaves_the_archive_s_root_cid(self):
+        """A ledger event that adds nothing to an archive leaves its root CID
+        as it was. Here a checkpoint writes into archive-integrity/ beside the
+        archive, which the archive's CID does not cover."""
+        with Scope() as scope:
+            plan = trial_plan(scope)
+            seal.apply(plan, ai.sha(ai.encoded(plan)))
+            archive = scope / '.clankos/archives'
+            integrity = scope / '.clankos/archive-integrity'
+            root = cid.cid_directory(archive)
+            before = sorted(p for p in integrity.rglob('*') if p.is_file())
+            ai.checkpoint_root(scope)
+            self.assertNotEqual(before, sorted(p for p in integrity.rglob('*') if p.is_file()))
+            self.assertEqual(root, cid.cid_directory(archive))
+
     def test_every_shared_fixture_converts_the_same_bytes(self):
         """The conversion events, what was skipped and the report after, or
         the refusal, as fixtures/ledger/ of kind convert."""
