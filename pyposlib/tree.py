@@ -625,8 +625,10 @@ def read_config(text):
     each key this reader does not know, which it leaves unread, and one
     for methodologies written as a path. The file does not say what its node is:
     where the node lies does. Every scalar is read as the text
-    written, and the keys' kinds decide what it is. Raises Refused, of a
-    kind doc/pos-directory.txt names, for a file it does not allow."""
+    written, and the keys' kinds decide what it is. A key pos, which
+    earlier versions of the document required, is ignored, whatever its
+    value. Raises Refused, of a kind doc/pos-directory.txt names, for a
+    file it does not allow."""
     try:
         parsed = yaml.load(text, Loader=yaml.BaseLoader)
     except yaml.YAMLError:
@@ -635,11 +637,9 @@ def read_config(text):
         parsed = {}
     if not _is_mapping(parsed):
         raise Refused('not-a-mapping', 'The file is not a mapping')
-    known, version = _typed(parsed.get('pos'), 'integer')
-    if known and version != VERSION:
-        raise Refused('unknown-version', f'Not a version this reader knows: {version}')
+    parsed = {key: value for key, value in parsed.items() if key != 'pos'}
     warnings = []
-    top = _mapping(parsed, 'The file', [('pos', 'integer', True), ('projects', 'string', False),
+    top = _mapping(parsed, 'The file', [('projects', 'string', False),
                                         ('methodologies', 'path-or-sequence', False),
                                         ('harnesses', 'sequence', False), ('image', 'string', False),
                                         ('bin', 'string', False), ('exclude', 'sequence', False), ('children', 'sequence', False),
