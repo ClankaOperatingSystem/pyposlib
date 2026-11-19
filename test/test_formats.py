@@ -198,6 +198,8 @@ class Formats(unittest.TestCase):
         for item in report:
             item['archive'] = Path(item['archive']).relative_to(base).as_posix()
         self.assertEqual(ai.encoded(fixture['report']), ai.encoded(report))
+        self.assertEqual(fixture.get('not_present', []),
+                         [child.relative_to(base).as_posix() for child in ai.not_present(root)])
 
 
 def snapshot(root):

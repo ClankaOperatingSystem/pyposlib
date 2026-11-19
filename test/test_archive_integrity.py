@@ -24,8 +24,9 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from pyposlib.archive_integrity import (META, apply_plan, encoded, history, inventory,
-                               preview, record, repair, report, seal_archive, sha)
+from pyposlib.archive_integrity import (ANCHORS, META, apply_plan, checkpoint_heads, checkpoint_root, encoded,
+                               history, inventory, not_present, preview, record, repair, report,
+                               seal_archive, sha)
 
 HOME = Path(__file__).resolve().parent.parent
 RUN = Path(tempfile.mkdtemp(prefix='pyposlib-'))
@@ -190,6 +191,83 @@ class IntegrityChecks(unittest.TestCase):
         self.assertTrue(any(r['writable'] for r in report(self.root)))
         apply_plan(plan, sha(encoded(plan)))
         self.assertTrue(all(not r['new'] and not r['writable'] for r in report(self.root)))
+
+    def test_a_child_not_cloned_is_named_and_not_a_truncated_history(self):
+        """A tree's checkpoint records each head by its archive's path. With a
+        repository the tree mounts by its remote not cloned, as in a fresh
+        clone or a worktree, the check passes, reports the archives that are
+        there and names the child; a child that is there without its archive
+        is refused."""
+        self.enrol()
+        root, child = self.root.resolve(), self.root / 'projects/B'
+        (self.root / '.pos').mkdir()
+        (self.root / '.pos/config.yaml').write_text(
+            'children:\n  - path: projects/B\n    remote: https://git.example/b.git\n')
+        self.assertEqual([], not_present(self.root))
+        child.rename(self.root / '_away')
+        self.assertEqual([str(root / 'projects/A/archives')], [r['archive'] for r in report(self.root)])
+        self.assertEqual([root / 'projects/B'], not_present(self.root))
+        checked = subprocess.run([sys.executable, '-B', str(HOME / 'archive_integrity.py'), 'check', str(self.root)],
+                                 capture_output=True)
+        self.assertEqual((0, f'not present: {root / "projects/B"}\n'.encode()),
+                         (checked.returncode, checked.stderr))
+        child.mkdir()
+        with self.assertRaisesRegex(ValueError, 'Missing anchored ledger'):
+            report(self.root)
+
+    def test_an_archive_kept_out_of_git_is_held_to_its_ledger(self):
+        """An archive no entry keeps otherwise is not committed, and its
+        ledger is. With the archive gone, as a clone or a worktree has it,
+        the check passes and names it; a truncated ledger is still refused,
+        and so is an archive an entry keeps committed."""
+        tool = [sys.executable, '-B', str(HOME / 'archive_integrity.py')]
+        scope = self.root / 'fresh'
+        (scope / '.clankos').mkdir(parents=True)
+        (self.root / '.pos').mkdir()
+        (self.root / '.pos/config.yaml').write_text('projects: projects/\n')
+        for name in ('one.txt', 'two.txt'):
+            subprocess.run([*tool, 'write-new', str(scope / '.clankos/archives' / name), '--apply'],
+                           input=b'sealed\n', capture_output=True, check=True)
+        shutil.rmtree(self.root / 'projects')
+        checkpoint_root(self.root)
+        archive = (scope / '.clankos/archives').resolve()
+        self.assertEqual([], not_present(self.root))
+        shutil.rmtree(archive)
+        self.assertEqual([], report(self.root))
+        self.assertEqual([archive], not_present(self.root))
+        (self.root / '.pos/config.yaml').write_text('archives:\n  - scope: fresh\n    kept: committed\n')
+        with self.assertRaisesRegex(ValueError, 'Missing anchored ledger'):
+            report(self.root)
+        (self.root / '.pos/config.yaml').write_text('projects: projects/\n')
+        sorted((scope / '.clankos/archive-integrity/ledger').iterdir())[-1].unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing anchored ledger'):
+            report(self.root)
+
+    def test_a_tree_s_checkpoint_supersedes_those_of_schema_1(self):
+        """A schema 1 checkpoint of a tree says nothing of the archive each
+        head belongs to, so it refuses where a child is not cloned. The next
+        checkpoint of the tree names it, once, and it is then passed over."""
+        self.enrol()
+        heads = sorted(history(self.root / 'projects' / p / 'archives')[1] for p in 'AB')
+        old = encoded(dict(schema=1, heads=heads, coverage='tree'))
+        (self.root / ANCHORS / (sha(old) + '.json')).write_bytes(old)
+        (self.root / '.pos').mkdir()
+        (self.root / '.pos/config.yaml').write_text(
+            'children:\n  - path: projects/B\n    remote: https://git.example/b.git\n')
+        child, away = self.root / 'projects/B', self.root / '_away'
+        child.rename(away)
+        with self.assertRaisesRegex(ValueError, 'Missing anchored ledger'):
+            report(self.root)
+        away.rename(child)
+        before = set((self.root / ANCHORS).iterdir())
+        checkpoint_heads(self.root)
+        (written,) = set((self.root / ANCHORS).iterdir()) - before
+        self.assertEqual([sha(old)], json.loads(written.read_bytes())['supersedes'])
+        # The next names none: its bytes are those of the one written on enrolling.
+        checkpoint_heads(self.root)
+        self.assertEqual(before | {written}, set((self.root / ANCHORS).iterdir()))
+        child.rename(away)
+        self.assertEqual(1, len(report(self.root)))
 
     def test_cli_is_poslib_s(self):
         """The command line is poslib's: a new record sealed at once, never

@@ -183,6 +183,25 @@ def archive_scope(archive):
     return parent.parent if parent.name in CONFIG_DIRECTORIES else parent
 
 
+def node_of(directory):
+    """The node at or above directory with its configuration, a pair, or None:
+    the nearest directory at or above it that holds a configuration, as
+    doc/pos-directory.txt names one. Refuses 'config' for a configuration
+    that is refused, and for two in one node."""
+    directory = Path(directory)
+    node, files = next(((part, found) for part in [directory, *directory.parents]
+                        if (found := config_files(part))), (None, []))
+    if len(files) > 1:
+        raise Refused('config', f'Configuration refused (two-configurations): {node}')
+    if not files:
+        return None
+    from . import tree  # needs PyYAML, which only a configured node asks for
+    try:
+        return node, tree.read_config((node / files[0]).read_bytes().decode('utf-8', 'replace'))
+    except Refused as refused:
+        raise Refused('config', f'Configuration refused ({refused.kind}): {node / files[0]}')
+
+
 def entry_of(archive):
     """The entry for archive's scope in its node's configuration, or None.
 
@@ -193,19 +212,45 @@ def entry_of(archive):
     a scope it does not name, or beneath no node. Refuses 'config' for a
     configuration that is refused, and for two in one node."""
     scope = archive_scope(archive)
-    node, files = next(((part, found) for part in [scope, *scope.parents]
-                        if (found := config_files(part))), (None, []))
-    if len(files) > 1:
-        raise Refused('config', f'Configuration refused (two-configurations): {node}')
-    if not files:
+    found = node_of(scope)
+    if not found:
         return None
-    from . import tree  # needs PyYAML, which only a configured node asks for
-    try:
-        config = tree.read_config((node / files[0]).read_bytes().decode('utf-8', 'replace'))
-    except Refused as refused:
-        raise Refused('config', f'Configuration refused ({refused.kind}): {node / files[0]}')
+    node, config = found
     path = scope.relative_to(node).as_posix()
     return next((a for a in config['archives'] if a['scope'] == path), None)
+
+
+def absent_child(path):
+    """The child holding path that is declared and not on disk, or None.
+
+    path is absolute. The child is one with a remote, declared by the
+    nearest configuration at or above the nearest directory on disk at or
+    above path, with nothing at its own path, which is path or above it: a
+    repository mounted there and not cloned."""
+    path = Path(path)
+    found = node_of(next(part for part in [path, *path.parents] if part.is_dir()))
+    if found:
+        node, config = found
+        for child in config['children']:
+            at = node / child['path']
+            if child['remote'] is not None and (at == path or at in path.parents) and not os.path.lexists(at):
+                return at
+    return None
+
+
+def uncommitted_absent(archive):
+    """Whether archive is kept out of Git and is not on disk.
+
+    archive is absolute. Nothing is at its path; its scope is a directory
+    at or beneath a node, whose entry for it, if there is one, keeps it
+    uncommitted; and the scope has its ledger. Such an archive is on disk
+    where it was sealed and nowhere else, while its ledger is committed: a
+    clone or a worktree has the ledger alone."""
+    archive = Path(archive)
+    scope = archive_scope(archive)
+    return bool(archive.name == 'archives' and not os.path.lexists(archive) and scope.is_dir()
+                and node_of(scope) and (entry_of(archive) or {'kept': 'uncommitted'})['kept'] == 'uncommitted'
+                and locations(scope)['ledger'])
 
 
 def kept(archive):
@@ -715,29 +760,97 @@ def checkpoint_home(archive):
     return scope / ANCHORS
 
 
+def checkpoint_folders(root, archives):
+    """The checkpoint directories covering root and archives, in path order:
+    the one checkpoint directory of each of their scopes, each a pair of the
+    directory and its scope, with every link in the scope's path resolved,
+    as discovery gives an archive's."""
+    folders = {}
+    for path in [root, *archives]:
+        scope = root_scope(Path(path).resolve())
+        if folder := locations(scope)['checkpoints']:
+            folders.setdefault(folder, scope)
+    return sorted(folders.items())
+
+
 def checkpoint_files(root, archives):
     """The checkpoint files covering root and archives: those in the one
     checkpoint directory of each of their scopes."""
-    folders = {locations(anchor_base(p))['checkpoints'] for p in [root, *archives]} - {None}
-    return [file for folder in sorted(folders) for file in sorted(folder.iterdir())]
+    return [file for folder, _ in checkpoint_folders(root, archives) for file in sorted(folder.iterdir())]
+
+
+def is_head(value):
+    """Whether value names an event: by its hash, or its CID as a block."""
+    return isinstance(value, str) and bool(re.fullmatch('[0-9a-f]{64}', value) or is_event_cid(value))
 
 
 def checkpoint_value(path):
     """The checkpoint in path, refused 'checkpoint' unless it is named by the
-    SHA-256 of its bytes, and has schema 1, a coverage of archive or tree,
-    and heads that are hashes or block CIDs."""
+    SHA-256 of its bytes. Of schema 1, it has a coverage of archive or tree,
+    and heads that are hashes or block CIDs. Of schema 2, it has a coverage
+    of tree; archives, a head for the path of each archive; and supersedes,
+    the names of schema 1 checkpoints, sorted, each once."""
     regular(path)
     data = path.read_bytes()
     if path.name != sha(data) + '.json':
         raise Refused('checkpoint', f'Checkpoint hash failure: {path}')
     value = json.loads(data)
-    if (set(value) != {'schema', 'heads', 'coverage'} or value['schema'] != 1
-            or value['coverage'] not in ('archive', 'tree')
-            or not isinstance(value['heads'], list)
-            or any(not isinstance(h, str) or not (re.fullmatch('[0-9a-f]{64}', h) or is_event_cid(h))
-                   for h in value['heads'])):
+    if not isinstance(value, dict) or isinstance(value.get('schema'), bool):
+        raise Refused('checkpoint', 'Invalid checkpoint')
+    if value.get('schema') == 1:
+        valid = (set(value) == {'schema', 'heads', 'coverage'}
+                 and value['coverage'] in ('archive', 'tree')
+                 and isinstance(value['heads'], list) and all(is_head(h) for h in value['heads']))
+    elif value.get('schema') == 2:
+        valid = (set(value) == {'schema', 'archives', 'supersedes', 'coverage'}
+                 and value['coverage'] == 'tree'
+                 and isinstance(value['archives'], dict)
+                 and all(is_safe(name) and is_head(head) for name, head in value['archives'].items())
+                 and isinstance(value['supersedes'], list)
+                 and all(isinstance(n, str) and re.fullmatch('[0-9a-f]{64}', n) for n in value['supersedes'])
+                 and value['supersedes'] == sorted(set(value['supersedes'])))
+    else:
+        valid = False
+    if not valid:
         raise Refused('checkpoint', 'Invalid checkpoint')
     return value
+
+
+def is_safe(relative):
+    """Whether relative is a plain relative path beneath a directory."""
+    try:
+        return isinstance(relative, str) and bool(safe(relative))
+    except Refused:
+        return False
+
+
+def anchored(checkpoints):
+    """The heads checkpoints anchor, each a pair of a head and its archive.
+
+    checkpoints are triples of a checkpoint's file, its value and the scope
+    its paths are from, or None. A schema 1 checkpoint gives its heads, each
+    with no archive, unless a schema 2 checkpoint among them supersedes it; a
+    schema 2 checkpoint gives the head of each archive with the archive's
+    path, absolute where there is a scope."""
+    superseded = {name for _, value, _ in checkpoints for name in value.get('supersedes', [])}
+    found = []
+    for path, value, scope in checkpoints:
+        if value['schema'] == 2:
+            found.extend((head, scope / name if scope else Path(name))
+                         for name, head in value['archives'].items())
+        elif path.stem not in superseded:
+            found.extend((head, None) for head in value['heads'])
+    return found
+
+
+def unsuperseded(folder):
+    """The names of the schema 1 tree checkpoints in folder to supersede:
+    those no schema 2 checkpoint there supersedes yet, sorted; none where
+    folder is not yet made."""
+    values = {path.stem: checkpoint_value(path) for path in sorted(folder.iterdir())} if folder.is_dir() else {}
+    superseded = {name for value in values.values() for name in value.get('supersedes', [])}
+    return sorted(name for name, value in values.items()
+                  if value['schema'] == 1 and value['coverage'] == 'tree' and name not in superseded)
 
 
 def is_ledger_file(path):
@@ -756,8 +869,9 @@ def check_within(directory):
     what the check of an archive holding directory reads of them, and no
     more. Each ledger within it, legacy or current, reads as a chain of
     events; and each head a checkpoint within it names is an event of one of
-    those ledgers, by its hash or its CID as a block, else 'anchor'.
-    directory need hold no archive, and no keeper is asked."""
+    those ledgers, by its hash or its CID as a block, else 'anchor'. A
+    schema 1 checkpoint that a schema 2 checkpoint within it supersedes is
+    passed over. directory need hold no archive, and no keeper is asked."""
     files = sorted(p for p in Path(directory).rglob('*.json') if not p.is_dir() or p.is_symlink())
     events = [p for p in files if is_ledger_file(p)]
     present = set()
@@ -767,36 +881,99 @@ def check_within(directory):
         present.update((sha(data), event_cid(data)))
     for folder in sorted({p.parent for p in events}):
         folder_history(folder)
-    required = {head for p in files if is_checkpoint_file(p) for head in checkpoint_value(p)['heads']}
+    required = {head for head, _ in anchored([(p, checkpoint_value(p), None)
+                                              for p in files if is_checkpoint_file(p)])}
     if required - present:
         raise Refused('anchor', f'Checkpointed events missing within {directory}: '
                       + ', '.join(sorted(required - present)))
 
 
-def check_anchors(root, archives):
-    required = set()
-    for path in checkpoint_files(root, archives):
-        value = checkpoint_value(path)
-        if Path(root).name != 'archives' or value['coverage'] == 'archive':
-            required.update(value['heads'])
+def anchors(root, archives):
+    """The heads the checkpoints for root anchor, as anchored gives them: of
+    the checkpoints covering root and archives; for a root named archives,
+    of those that cover an archive."""
+    found = []
+    for folder, scope in checkpoint_folders(root, archives):
+        for path in sorted(folder.iterdir()):
+            value = checkpoint_value(path)
+            if Path(root).name != 'archives' or value['coverage'] == 'archive':
+                found.append((path, value, scope))
+    return anchored(found)
+
+
+def set_aside(heads):
+    """heads, as anchored gives them, split by what of each archive is on
+    disk, in three. First, the heads to hold to: all but those recorded for
+    an archive in a child that is declared and not on disk, as absent_child
+    finds it, which are set aside. Second, what is not present, sorted, each
+    once: each such child, and each archive that is kept out of Git and not
+    on disk, as uncommitted_absent has it. Third, those archives, whose
+    heads are held to their ledgers."""
+    found, kept, absent, ledgers = {}, [], set(), set()
+    for head, archive in heads:
+        if archive is not None and archive not in found:
+            found[archive] = absent_child(archive) or (uncommitted_absent(archive) and 'ledger')
+        what = found[archive] if archive is not None else None
+        if what == 'ledger':
+            ledgers.add(archive)
+        elif what:
+            absent.add(what)
+            continue
+        kept.append((head, archive))
+    return kept, sorted(absent | ledgers), sorted(ledgers)
+
+
+def not_present(root):
+    """What a checkpoint for root records that a clone need not hold, sorted.
+
+    Each is a child that is declared and not on disk: a repository that a
+    configuration mounts by its remote, with nothing at its path, in which a
+    checkpoint records an archive. Or it is an archive a checkpoint records
+    that is kept out of Git and not on disk, its ledger being there. The
+    check sets the heads recorded for such a child aside, having no ledger
+    to hold them to, and holds the head of such an archive to its ledger."""
+    return set_aside(anchors(root, roots(root)))[1]
+
+
+def ledger_hashes(archive):
+    """The hash and block CID of every ledger event in or beside archive: its
+    own ledger's events and those of every ledger within it, as the
+    unchanged ledgers retired projects carry. Of an archive a keeper keeps,
+    the ledgers within are known by the names their events are enrolled
+    under."""
     present = set()
+    folder = ledger_folder(archive)
+    own = list(folder.glob('*.json')) if folder.is_dir() else []
+    for path in own + list(archive.rglob('*.json')):
+        if path in own or path.parent.name == META or (
+                path.parent.name == 'ledger' and path.parent.parent.name == INTEGRITY):
+            regular(path)
+            data = path.read_bytes()
+            present.update((sha(data), event_cid(data)))
+    if kept(archive):
+        for name in history(archive)[0]:
+            parts = name.split('/')
+            named = EVENT_NAME.fullmatch(parts[-1])
+            if named and (parts[-2:-1] == [META] or parts[-3:-1] == [INTEGRITY, 'ledger']):
+                present.add(named[2])
+    return present
+
+
+def check_anchors(root, archives):
+    """Refuses 'anchor' unless every head a checkpoint for root names is in
+    archives. A head a schema 2 checkpoint records for an archive in a child
+    that is declared and not on disk is set aside, and one it records for an
+    archive kept out of Git and not on disk is held to that archive's
+    ledger, read as a chain of events, as not_present has them: neither is a
+    truncated history."""
+    held, _, ledgers = set_aside(anchors(root, archives))
+    required = {head for head, _ in held}
+    present = set()
+    for archive in ledgers:
+        history(archive)
+        present |= ledger_hashes(archive)
     for archive in archives:
-        # Its own ledger, and the unchanged ledgers carried inside retired projects.
-        folder = ledger_folder(archive)
-        own = list(folder.glob('*.json')) if folder.is_dir() else []
-        for path in own + list(archive.rglob('*.json')):
-            if path in own or path.parent.name == META or (
-                    path.parent.name == 'ledger' and path.parent.parent.name == INTEGRITY):
-                regular(path)
-                data = path.read_bytes()
-                present.update((sha(data), event_cid(data)))
-        if kept(archive):
-            # The ledgers within are with the keeper: known by their events' enrolled names.
-            for name in history(archive)[0]:
-                parts = name.split('/')
-                named = EVENT_NAME.fullmatch(parts[-1])
-                if named and (parts[-2:-1] == [META] or parts[-3:-1] == [INTEGRITY, 'ledger']):
-                    present.add(named[2])
+        present |= ledger_hashes(archive)
     if required - present:
         raise Refused('anchor', 'Missing anchored ledger (archive removed or history truncated): ' +
                          ', '.join(sorted(required - present)))
@@ -804,13 +981,24 @@ def check_anchors(root, archives):
 
 def checkpoint_heads(root, home=None):
     """Retain observed ledger heads outside archives to detect a vanished tree:
-    in home, by default where the legacy writer puts them."""
+    in home, by default where the legacy writer puts them. The checkpoint
+    covers an archive if root is one, and is then of schema 1. Else it
+    covers the tree and is of schema 2: it records each head by its
+    archive's path from root's scope, and supersedes every schema 1
+    checkpoint of the tree in home that none supersedes yet, the check
+    having found every head they name."""
     archives = roots(root)
     check_anchors(root, archives)
-    heads = sorted({history(a)[1] for a in archives if history(a)[1]})
+    heads = {a: history(a)[1] for a in archives if history(a)[1]}
     if heads:
-        data = encoded(dict(schema=1, heads=heads, coverage=coverage(checked(root).resolve())))
-        path = (home or anchor_home(root)) / (sha(data) + '.json')
+        home = home or anchor_home(root)
+        if coverage(checked(root).resolve()) == 'archive':
+            data = encoded(dict(schema=1, heads=sorted(set(heads.values())), coverage='archive'))
+        else:
+            base = anchor_base(root)
+            data = encoded(dict(schema=2, coverage='tree', supersedes=unsuperseded(home),
+                                archives={a.relative_to(base).as_posix(): head for a, head in heads.items()}))
+        path = home / (sha(data) + '.json')
         if not path.exists():
             new_file(path, data)
         elif path.read_bytes() != data:
@@ -1165,7 +1353,9 @@ USAGE = """Usage: COMMAND ...  (help prints this; Emacs itself takes --help)
       as seal or write-new printed it, and HASH is the SHA-256 of that
       file's bytes in lower-case hex, as sha256sum PLAN prints it
   check ROOT
-      report every archive under ROOT, as JSON
+      report every archive under ROOT, as JSON; a mounted repository
+      that is not cloned, or an archive kept out of Git that is not on
+      disk, is named on standard error, as not present
   checkpoint ROOT
       record the ledger heads under ROOT, once the check is clean
   repair ROOT
@@ -1217,6 +1407,8 @@ def main(args=None):
             return 0
         if len(args) == 2 and args[0] == 'check':
             result = report(args[1])
+            for child in not_present(args[1]):
+                print(f'not present: {child}', file=sys.stderr)
             sys.stdout.buffer.write(encoded(result))
             return int(any(findings(r) for r in result))
         if len(args) == 2 and args[0] == 'checkpoint':
